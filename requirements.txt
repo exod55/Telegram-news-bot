@@ -1,5 +1,5 @@
 pyTelegramBotAPI
-feedparser
-requests
 flask
-gunicorn
+feedparser
+pymongo
+dnspython
