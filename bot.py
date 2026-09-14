@@ -32,10 +32,20 @@ def mark_as_sent(link):
 
 def fetch_latest_post():
     rss_url = "https://rss-bridge.org/bridge01/?action=display&bridge=InstagramBridge&context=Username&u=igndotcom&media_type=picture&format=Mrss"
-    feed = feedparser.parse(rss_url)
-    if feed.entries:
-        return feed.entries[0] # Return the very latest
-    return None
+    print(f"DEBUG: Trying to fetch from {rss_url}")
+    try:
+        feed = feedparser.parse(rss_url)
+        print(f"DEBUG: Feed status: {feed.status}")
+        print(f"DEBUG: Entries found: {len(feed.entries)}")
+        
+        if feed.entries:
+            return feed.entries[0]
+        else:
+            print("DEBUG: No entries found in the feed object.")
+            return None
+    except Exception as e:
+        print(f"DEBUG: Error fetching feed: {e}")
+        return None
 
 # --- COMMANDS ---
 @bot.message_handler(commands=['start'])
