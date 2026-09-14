@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 import feedparser
 import telebot
 from flask import Flask
@@ -15,7 +16,6 @@ client = MongoClient(MONGO_URI)
 db = client.bot_database
 links_collection = db.posted_links
 
-# --- BOT SETUP ---
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
@@ -27,52 +27,56 @@ def is_link_sent(link):
     return links_collection.find_one({"link": link}) is not None
 
 def mark_as_sent(link):
-    links_collection.insert_one({"link": link})
+    if not is_link_sent(link):
+        links_collection.insert_one({"link": link})
 
-def check_feeds():
+def fetch_latest_post():
     rss_url = "https://rss-bridge.org/bridge01/?action=display&bridge=InstagramBridge&context=Username&u=igndotcom&media_type=picture&format=Mrss"
-    print(f"Fetching RSS: {rss_url}")
     feed = feedparser.parse(rss_url)
-    
-    print(f"Found {len(feed.entries)} entries in feed.")
-    
-    for entry in reversed(feed.entries[:5]):
-        print(f"Checking entry: {entry.title} - {entry.link}")
-        if not is_link_sent(entry.link):
-            print(f"New post found! Sending: {entry.title}")
-            caption = f"🎬 **{entry.title}**\n\n🔗 [Read More]({entry.link})"
-            
-            try:
-                # Let's try sending just text first to verify channel access
-                bot.send_message(CHANNEL_ID, caption, parse_mode="Markdown")
-                mark_as_sent(entry.link)
-                print("Successfully sent and saved to DB.")
-            except Exception as e:
-                print(f"CRITICAL ERROR sending to channel: {e}")
-        else:
-            print("Post already in database, skipping.")
+    if feed.entries:
+        return feed.entries[0] # Return the very latest
+    return None
 
-# --- THREADS ---
-def run_scheduler():
-    import time
-    while True:
-        try:
-            check_feeds()
-        except Exception as e:
-            print(f"Loop error: {e}")
-        time.sleep(300)
-
+# --- COMMANDS ---
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "🤖 Bot is online and connected to MongoDB!")
+    bot.send_message(message.chat.id, "🤖 Bot is online and connected to MongoDB!")
+
+@bot.message_handler(commands=['snd'])
+def send_latest(message):
+    bot.send_message(message.chat.id, "🔍 Fetching latest post...")
+    entry = fetch_latest_post()
+    if entry:
+        caption = f"🎬 {entry.title}\n\n🔗 {entry.link}"
+        try:
+            bot.send_message(CHANNEL_ID, caption)
+            mark_as_sent(entry.link)
+            bot.send_message(message.chat.id, "✅ Successfully sent to channel!")
+        except Exception as e:
+            bot.send_message(message.chat.id, f"❌ Error: {str(e)}")
+    else:
+        bot.send_message(message.chat.id, "❌ Could not find any posts.")
+
+# --- AUTOMATION ---
+def run_scheduler():
+    while True:
+        entry = fetch_latest_post()
+        if entry and not is_link_sent(entry.link):
+            caption = f"🎬 {entry.title}\n\n🔗 {entry.link}"
+            try:
+                bot.send_message(CHANNEL_ID, caption)
+                mark_as_sent(entry.link)
+            except Exception as e:
+                print(f"Auto-send error: {e}")
+        time.sleep(300)
 
 if __name__ == "__main__":
     # Start Web Server
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080))), daemon=True).start()
     
-    # Start Scheduler
+    # Start Automation
     threading.Thread(target=run_scheduler, daemon=True).start()
     
-    # Run Bot Polling with a timeout to prevent conflicts
+    # Run Bot
     print("Bot is polling...")
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    bot.infinity_polling(none_stop=True, timeout=30)
