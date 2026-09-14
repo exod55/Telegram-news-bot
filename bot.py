@@ -69,7 +69,10 @@ def start(message):
 if __name__ == "__main__":
     # Start Web Server
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080))), daemon=True).start()
+    
     # Start Scheduler
     threading.Thread(target=run_scheduler, daemon=True).start()
-    # Start Bot
-    bot.infinity_polling()
+    
+    # Run Bot Polling with a timeout to prevent conflicts
+    print("Bot is polling...")
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)
