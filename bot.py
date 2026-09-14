@@ -21,14 +21,13 @@ def run_flask():
 # --- CONFIGURATION ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
-CHECK_INTERVAL = 1800  # Check every 30 minutes
+# Check feeds every 5 minutes (300 seconds) instead of 30
+CHECK_INTERVAL = 300
 
 SENT_POSTS_FILE = "posted_links.json"
 
 FEEDS = [
-    "https://feeds.feedburner.com/ign/news",
-    "https://screenrant.com/feed/",
-    "https://variety.com/feed/",
+    "https://rss-bridge.org/bridge01/?action=display&bridge=InstagramBridge&context=Username&u=IGN&media_type=picture&format=Mrss",
 ]
 
 if not BOT_TOKEN:
