@@ -31,26 +31,26 @@ def mark_as_sent(link):
 
 def check_feeds():
     rss_url = "https://rss-bridge.org/bridge01/?action=display&bridge=InstagramBridge&context=Username&u=IGN&media_type=picture&format=Mrss"
+    print(f"Fetching RSS: {rss_url}")
     feed = feedparser.parse(rss_url)
     
+    print(f"Found {len(feed.entries)} entries in feed.")
+    
     for entry in reversed(feed.entries[:5]):
+        print(f"Checking entry: {entry.title} - {entry.link}")
         if not is_link_sent(entry.link):
-            # Try to get the image URL from the feed
-            img_url = None
-            if 'media_content' in entry:
-                img_url = entry.media_content[0]['url']
-            
+            print(f"New post found! Sending: {entry.title}")
             caption = f"🎬 **{entry.title}**\n\n🔗 [Read More]({entry.link})"
             
             try:
-                if img_url:
-                    bot.send_photo(CHANNEL_ID, photo=img_url, caption=caption, parse_mode="Markdown")
-                else:
-                    bot.send_message(CHANNEL_ID, caption, parse_mode="Markdown")
-                
+                # Let's try sending just text first to verify channel access
+                bot.send_message(CHANNEL_ID, caption, parse_mode="Markdown")
                 mark_as_sent(entry.link)
+                print("Successfully sent and saved to DB.")
             except Exception as e:
-                print(f"Error sending to Telegram: {e}")
+                print(f"CRITICAL ERROR sending to channel: {e}")
+        else:
+            print("Post already in database, skipping.")
 
 # --- THREADS ---
 def run_scheduler():
