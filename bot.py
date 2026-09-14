@@ -30,7 +30,7 @@ def mark_as_sent(link):
     links_collection.insert_one({"link": link})
 
 def check_feeds():
-    rss_url = "https://rss-bridge.org/bridge01/?action=display&bridge=InstagramBridge&context=Username&u=IGN&media_type=picture&format=Mrss"
+    rss_url = "https://rss-bridge.org/bridge01/?action=display&bridge=InstagramBridge&context=Username&u=igndotcom&media_type=picture&format=Mrss"
     print(f"Fetching RSS: {rss_url}")
     feed = feedparser.parse(rss_url)
     
