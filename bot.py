@@ -35,12 +35,22 @@ def check_feeds():
     
     for entry in reversed(feed.entries[:5]):
         if not is_link_sent(entry.link):
+            # Try to get the image URL from the feed
+            img_url = None
+            if 'media_content' in entry:
+                img_url = entry.media_content[0]['url']
+            
             caption = f"🎬 **{entry.title}**\n\n🔗 [Read More]({entry.link})"
+            
             try:
-                bot.send_message(CHANNEL_ID, caption, parse_mode="Markdown")
+                if img_url:
+                    bot.send_photo(CHANNEL_ID, photo=img_url, caption=caption, parse_mode="Markdown")
+                else:
+                    bot.send_message(CHANNEL_ID, caption, parse_mode="Markdown")
+                
                 mark_as_sent(entry.link)
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"Error sending to Telegram: {e}")
 
 # --- THREADS ---
 def run_scheduler():
