@@ -111,4 +111,5 @@ if __name__ == "__main__":
     
     # Run Bot
     print("Bot is polling...")
-    bot.infinity_polling()
+    # Change the last line from bot.infinity_polling() to this:
+    bot.infinity_polling(none_stop=True, interval=1, timeout=30)
