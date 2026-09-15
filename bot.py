@@ -3,7 +3,7 @@ import threading
 import time
 import feedparser
 import telebot
-import requests # Add this to your imports
+import requests
 from flask import Flask
 from supabase import create_client
 
@@ -24,13 +24,15 @@ def home(): return "Bot is live!"
 
 # --- DATABASE FUNCTIONS ---
 def is_link_sent(link):
-    # Queries Supabase to see if the link exists in the 'posted_links' table
-    response = supabase.table("posted_links").select("link").eq("link", link).execute()
+    # Normalize link (strip trailing slashes to avoid duplicates)
+    clean_link = link.rstrip('/')
+    response = supabase.table("posted_links").select("link").eq("link", clean_link).execute()
     return len(response.data) > 0
 
 def mark_as_sent(link):
+    clean_link = link.rstrip('/')
     try:
-        supabase.table("posted_links").insert({"link": link}).execute()
+        supabase.table("posted_links").insert({"link": clean_link}).execute()
     except Exception as e:
         print(f"Database insertion error: {e}")
 
@@ -50,58 +52,47 @@ def send_post(entry):
     
     if image_url:
         try:
-            # Download the image to memory
-            response = requests.get(image_url, timeout=10)
+            # We use a session to mimic a browser
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(image_url, headers=headers, timeout=15)
             if response.status_code == 200:
-                # Send the downloaded data directly
                 bot.send_photo(CHANNEL_ID, response.content, caption=caption)
             else:
-                # If image download fails, fallback to sending text only
-                bot.send_message(CHANNEL_ID, f"{caption}\n\n[Image failed to load]")
+                bot.send_message(CHANNEL_ID, caption)
         except Exception as e:
-            print(f"Image upload error: {e}")
+            print(f"Image download error: {e}")
             bot.send_message(CHANNEL_ID, caption)
     else:
         bot.send_message(CHANNEL_ID, caption)
 
-# --- COMMANDS ---
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.send_message(message.chat.id, "🤖 Bot is online and connected to Supabase!")
-
-@bot.message_handler(commands=['snd'])
-def send_latest(message):
-    bot.send_message(message.chat.id, "🔍 Checking for new posts...")
+# --- AUTOMATION ---
+def process_new_posts():
     entries = fetch_feed()
-    count = 0
-    # Process in reverse (oldest to newest) to maintain order in channel
+    # Reverse so we process oldest to newest
     for entry in reversed(entries):
+        # Double check the link exists
+        if not entry.get('link'): continue 
+        
         if not is_link_sent(entry.link):
+            print(f"Sending new post: {entry.title}")
             send_post(entry)
             mark_as_sent(entry.link)
-            count += 1
-    bot.send_message(message.chat.id, f"✅ Processed {count} new posts.")
+        else:
+            print(f"Skipping already sent: {entry.title}")
 
-# --- AUTOMATION ---
 def run_scheduler():
     while True:
-        entries = fetch_feed()
-        for entry in reversed(entries):
-            if not is_link_sent(entry.link):
-                try:
-                    send_post(entry)
-                    mark_as_sent(entry.link)
-                except Exception as e:
-                    print(f"Auto-send error: {e}")
-        time.sleep(300) # Check every 5 minutes
+        process_new_posts()
+        time.sleep(300) # 5 minutes
+
+# --- COMMANDS ---
+@bot.message_handler(commands=['snd'])
+def manual_send(message):
+    bot.reply_to(message, "🔍 Manually checking for new posts...")
+    process_new_posts()
+    bot.reply_to(message, "✅ Done.")
 
 if __name__ == "__main__":
-    # Start Web Server for keep-alive
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080))), daemon=True).start()
-    
-    # Start Automation
     threading.Thread(target=run_scheduler, daemon=True).start()
-    
-    # Run Bot
-    print("Bot is polling...")
-    bot.infinity_polling(none_stop=True)
+    bot.infinity_polling()
