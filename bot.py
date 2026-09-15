@@ -30,55 +30,55 @@ def mark_as_sent(link):
     if not is_link_sent(link):
         links_collection.insert_one({"link": link})
 
-def fetch_latest_post():
+def fetch_feed():
     rss_url = "https://rss-bridge.org/bridge01/?action=display&bridge=InstagramBridge&context=Username&u=igndotcom&media_type=picture&format=Mrss"
-    print(f"DEBUG: Trying to fetch from {rss_url}")
     try:
         feed = feedparser.parse(rss_url)
-        print(f"DEBUG: Feed status: {feed.status}")
-        print(f"DEBUG: Entries found: {len(feed.entries)}")
-        
-        if feed.entries:
-            return feed.entries[0]
-        else:
-            print("DEBUG: No entries found in the feed object.")
-            return None
+        return feed.entries
     except Exception as e:
-        print(f"DEBUG: Error fetching feed: {e}")
-        return None
+        print(f"Error fetching feed: {e}")
+        return []
+
+def send_post(entry):
+    """Helper to send photo or text based on availability"""
+    image_url = entry.media_content[0]['url'] if 'media_content' in entry else None
+    caption = f"🎬 {entry.title}\n\n🔗 {entry.link}"
+    
+    if image_url:
+        bot.send_photo(CHANNEL_ID, image_url, caption=caption)
+    else:
+        bot.send_message(CHANNEL_ID, caption)
 
 # --- COMMANDS ---
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.send_message(message.chat.id, "🤖 Bot is online and connected to MongoDB!")
+    bot.send_message(message.chat.id, "🤖 Bot is online!")
 
 @bot.message_handler(commands=['snd'])
 def send_latest(message):
-    bot.send_message(message.chat.id, "🔍 Fetching latest post...")
-    entry = fetch_latest_post()
-    if entry:
-        caption = f"🎬 {entry.title}\n\n🔗 {entry.link}"
-        try:
-            bot.send_message(CHANNEL_ID, caption)
+    bot.send_message(message.chat.id, "🔍 Checking for new posts...")
+    entries = fetch_feed()
+    count = 0
+    # Process in reverse to maintain chronological order
+    for entry in reversed(entries):
+        if not is_link_sent(entry.link):
+            send_post(entry)
             mark_as_sent(entry.link)
-            bot.send_message(message.chat.id, "✅ Successfully sent to channel!")
-        except Exception as e:
-            bot.send_message(message.chat.id, f"❌ Error: {str(e)}")
-    else:
-        bot.send_message(message.chat.id, "❌ Could not find any posts.")
+            count += 1
+    bot.send_message(message.chat.id, f"✅ Processed {count} new posts.")
 
 # --- AUTOMATION ---
 def run_scheduler():
     while True:
-        entry = fetch_latest_post()
-        if entry and not is_link_sent(entry.link):
-            caption = f"🎬 {entry.title}\n\n🔗 {entry.link}"
-            try:
-                bot.send_message(CHANNEL_ID, caption)
-                mark_as_sent(entry.link)
-            except Exception as e:
-                print(f"Auto-send error: {e}")
-        time.sleep(300)
+        entries = fetch_feed()
+        for entry in reversed(entries):
+            if not is_link_sent(entry.link):
+                try:
+                    send_post(entry)
+                    mark_as_sent(entry.link)
+                except Exception as e:
+                    print(f"Auto-send error: {e}")
+        time.sleep(300) # Check every 5 minutes
 
 if __name__ == "__main__":
     # Start Web Server
@@ -89,4 +89,4 @@ if __name__ == "__main__":
     
     # Run Bot
     print("Bot is polling...")
-    bot.infinity_polling(none_stop=True, timeout=30)
+    bot.infinity_polling(none_stop=True)
