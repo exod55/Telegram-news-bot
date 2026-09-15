@@ -1,6 +1,4 @@
 pyTelegramBotAPI
 flask
 feedparser
-pymongo
-dnspython
 supabase
