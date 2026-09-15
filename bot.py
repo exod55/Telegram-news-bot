@@ -3,6 +3,7 @@ import threading
 import time
 import feedparser
 import telebot
+import requests # Add this to your imports
 from flask import Flask
 from supabase import create_client
 
@@ -48,7 +49,18 @@ def send_post(entry):
     caption = f"🎬 {entry.title}\n\n🔗 {entry.link}"
     
     if image_url:
-        bot.send_photo(CHANNEL_ID, image_url, caption=caption)
+        try:
+            # Download the image to memory
+            response = requests.get(image_url, timeout=10)
+            if response.status_code == 200:
+                # Send the downloaded data directly
+                bot.send_photo(CHANNEL_ID, response.content, caption=caption)
+            else:
+                # If image download fails, fallback to sending text only
+                bot.send_message(CHANNEL_ID, f"{caption}\n\n[Image failed to load]")
+        except Exception as e:
+            print(f"Image upload error: {e}")
+            bot.send_message(CHANNEL_ID, caption)
     else:
         bot.send_message(CHANNEL_ID, caption)
 
