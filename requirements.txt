@@ -2,3 +2,4 @@ pyTelegramBotAPI
 flask
 feedparser
 supabase
+requests
