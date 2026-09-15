@@ -54,7 +54,8 @@ def fetch_feed():
 
 def send_post(entry):
     image_url = entry.media_content[0]['url'] if 'media_content' in entry else None
-    caption = f"🎬 {entry.title}\n\n🔗 {entry.link}"
+    # Truncate caption to 1024 characters (Telegram limit for photos)
+    caption = (f"🎬 {entry.title}\n\n🔗 {entry.link}")[:1024]
     
     if image_url:
         try:
@@ -65,7 +66,7 @@ def send_post(entry):
             else:
                 bot.send_message(CHANNEL_ID, caption)
         except Exception as e:
-            print(f"Image download error: {e}")
+            print(f"Image error: {e}")
             bot.send_message(CHANNEL_ID, caption)
     else:
         bot.send_message(CHANNEL_ID, caption)
@@ -111,5 +112,5 @@ if __name__ == "__main__":
     
     # Run Bot
     print("Bot is polling...")
-    # Change the last line from bot.infinity_polling() to this:
-    bot.infinity_polling(none_stop=True, interval=1, timeout=30)
+    # Add skip_pending to clear out old interrupted connections
+    bot.infinity_polling(none_stop=True, skip_pending=True)
