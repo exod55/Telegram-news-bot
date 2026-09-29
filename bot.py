@@ -18,15 +18,24 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# --- SUPABASE SETUP ---
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__, static_folder="static", static_url_path="")
 
 ALLOWED_IMAGE_HOSTS = {
     "www.instagram.com",
     "instagram.com",
+}
+
+IG_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 "
+        "Mobile/15E148 Safari/604.1"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.instagram.com/",
 }
 
 
@@ -64,7 +73,6 @@ def get_posts():
 
 @app.route("/api/image")
 def proxy_image():
-    """Proxy Instagram media for the Mini App."""
     url = request.args.get("url", "").strip()
     if not url:
         return jsonify({"ok": False, "error": "missing url"}), 400
@@ -72,7 +80,6 @@ def proxy_image():
         return jsonify({"ok": False, "error": "only https urls allowed"}), 400
     if not _host_allowed(url):
         return jsonify({"ok": False, "error": "host not allowed"}), 403
-
     try:
         headers = {
             "User-Agent": (
@@ -86,11 +93,9 @@ def proxy_image():
         r = requests.get(url, headers=headers, timeout=20, stream=True)
         if r.status_code != 200:
             return jsonify({"ok": False, "error": f"upstream {r.status_code}"}), 502
-
         content_type = r.headers.get("Content-Type", "image/jpeg")
         if "text/html" in content_type:
             return jsonify({"ok": False, "error": "upstream returned html"}), 502
-
         return Response(
             r.iter_content(chunk_size=16 * 1024),
             status=200,
@@ -107,11 +112,123 @@ def health():
     return "Bot is live!"
 
 
-# --- DATABASE FUNCTIONS ---
+# --- LINK / CAPTION HELPERS ---
 def get_clean_link(link):
-    return link.split("?")[0].rstrip("/")
+    return (link or "").split("?")[0].rstrip("/")
 
 
+def instagram_shortcode(link: str):
+    m = re.search(r"instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)", link or "")
+    return m.group(1) if m else None
+
+
+def media_url_from_link(link: str) -> str:
+    """Stable image URL derived only from the Instagram post link."""
+    code = instagram_shortcode(link)
+    if not code:
+        return ""
+    return f"https://www.instagram.com/p/{code}/media/?size=l"
+
+
+def strip_html(text):
+    if not text:
+        return ""
+    text = html.unescape(text)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    return text.strip()
+
+
+def remove_bio_phrases(text):
+    if not text:
+        return text
+    patterns = [
+        r"(?i)\s*link\s+in\s+(?:the\s+)?(?:bio|comments?)\b[^.]*\.?\s*$",
+        r"(?i)\s*read\s+more\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
+        r"(?i)\s*full\s+(?:review|article|story)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
+        r"(?i)\s*more\s+(?:info|details?|here)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
+        r"(?i)\s*link\s+in\s+bio\.?\s*$",
+        r"(?i)\s*view\s+all\s+\d+\s+comments\.?\s*$",
+        r"\s*\.{2,}\s*$",
+    ]
+    cleaned = text
+    for pat in patterns:
+        cleaned = re.sub(pat, "", cleaned)
+    return cleaned.strip(" \t\n\r.-–—")
+
+
+def extract_caption_from_rss_entry(entry):
+    candidates = []
+    for key in ("summary", "description"):
+        raw = entry.get(key)
+        if raw:
+            plain = strip_html(raw)
+            if plain:
+                candidates.append(plain)
+    title = (entry.get("title") or "").strip()
+    if title:
+        candidates.append(title)
+    caption = max(candidates, key=len) if candidates else ""
+    return remove_bio_phrases(caption)
+
+
+def fetch_info_from_instagram_link(link: str) -> dict:
+    """
+    Use ONLY the Instagram post URL to build the data we store in Supabase:
+      - image_url  → /p/{code}/media/?size=l
+      - caption    → public embed page text
+    """
+    clean = get_clean_link(link)
+    code = instagram_shortcode(clean)
+    result = {"link": clean, "caption": "", "image_url": ""}
+
+    if not code:
+        print(f"[IG] Not an Instagram post link: {link}")
+        return result
+
+    result["image_url"] = media_url_from_link(clean)
+
+    embed_url = f"https://www.instagram.com/p/{code}/embed/captioned/"
+    try:
+        r = requests.get(embed_url, headers=IG_HEADERS, timeout=20)
+        if r.status_code == 200 and r.text:
+            m = re.search(
+                r'class="Caption"[^>]*>(.*?)</div>\s*<div class="CaptionComments"',
+                r.text,
+                re.I | re.S,
+            )
+            if not m:
+                m = re.search(r'class="Caption"[^>]*>(.*?)</div>', r.text, re.I | re.S)
+            if m:
+                raw = m.group(1)
+                raw = re.sub(
+                    r'<a class="CaptionUsername"[^>]*>.*?</a>',
+                    "",
+                    raw,
+                    flags=re.I | re.S,
+                )
+                raw = re.sub(r"<br\s*/?>", "\n", raw, flags=re.I)
+                raw = re.sub(r"<[^>]+>", "", raw)
+                result["caption"] = remove_bio_phrases(html.unescape(raw).strip())
+        else:
+            print(f"[IG] Embed HTTP {r.status_code} for {code}")
+    except Exception as e:
+        print(f"[IG] Embed fetch failed for {code}: {e}")
+
+    if not result["caption"]:
+        result["caption"] = "New post"
+
+    print(
+        f"[IG] Resolved {code}: "
+        f"caption={result['caption'][:60]!r}... "
+        f"image={bool(result['image_url'])}"
+    )
+    return result
+
+
+# --- DATABASE ---
 def is_link_sent(link):
     clean_link = get_clean_link(link)
     response = (
@@ -123,18 +240,23 @@ def is_link_sent(link):
     return len(response.data) > 0
 
 
-def mark_as_sent(link, caption="", image_url=""):
+def save_post_to_supabase(link, caption="", image_url=""):
+    """Insert a full row using Instagram-derived fields."""
     clean_link = get_clean_link(link)
+    # Always prefer Instagram-derived image URL when we have a post link
+    if not image_url:
+        image_url = media_url_from_link(clean_link)
     try:
         supabase.table("posted_links").insert(
             {
                 "link": clean_link,
-                "caption": caption,
-                "image_url": image_url,
+                "caption": caption or "New post",
+                "image_url": image_url or "",
             }
         ).execute()
+        print(f"[DB] Saved {clean_link}")
     except Exception as e:
-        print(f"Database insertion error (likely duplicate): {e}")
+        print(f"[DB] Insert error (likely duplicate): {e}")
 
 
 def update_post_fields(link, caption=None, image_url=None):
@@ -150,7 +272,7 @@ def update_post_fields(link, caption=None, image_url=None):
         supabase.table("posted_links").update(payload).eq("link", clean_link).execute()
         return True
     except Exception as e:
-        print(f"Database update error: {e}")
+        print(f"[DB] Update error: {e}")
         return False
 
 
@@ -176,123 +298,7 @@ def get_rows_needing_refill():
         return []
 
 
-# --- CAPTION HELPERS ---
-def strip_html(text):
-    if not text:
-        return ""
-    text = html.unescape(text)
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
-    return text.strip()
-
-
-def remove_bio_phrases(text):
-    if not text:
-        return text
-
-    patterns = [
-        r"(?i)\s*link\s+in\s+(?:the\s+)?(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*read\s+more\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*full\s+(?:review|article|story)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*more\s+(?:info|details?|here)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*link\s+in\s+bio\.?\s*$",
-        r"(?i)\s*view\s+all\s+\d+\s+comments\.?\s*$",
-        r"\s*\.{2,}\s*$",
-    ]
-
-    cleaned = text
-    for pat in patterns:
-        cleaned = re.sub(pat, "", cleaned)
-
-    return cleaned.strip(" \t\n\r.-–—")
-
-
-def extract_caption(entry):
-    candidates = []
-    for key in ("summary", "description"):
-        raw = entry.get(key)
-        if raw:
-            plain = strip_html(raw)
-            if plain:
-                candidates.append(plain)
-
-    title = (entry.get("title") or "").strip()
-    if title:
-        candidates.append(title)
-
-    caption = max(candidates, key=len) if candidates else ""
-    caption = remove_bio_phrases(caption)
-    return caption or "New post"
-
-
-def instagram_shortcode(link: str):
-    """Extract shortcode from /p/CODE/ or /reel/CODE/ URLs."""
-    m = re.search(r"instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)", link or "")
-    return m.group(1) if m else None
-
-
-def media_url_from_link(link: str):
-    """Build a working Instagram media URL from a post link."""
-    code = instagram_shortcode(link)
-    if not code:
-        return ""
-    return f"https://www.instagram.com/p/{code}/media/?size=l"
-
-
-def fetch_instagram_post_meta(link: str):
-    """
-    Fetch caption (and confirm media) for posts no longer in the RSS feed
-    via Instagram's public embed page.
-    """
-    code = instagram_shortcode(link)
-    if not code:
-        return {"caption": "", "image_url": ""}
-
-    image_url = media_url_from_link(link)
-    caption = ""
-
-    embed_url = f"https://www.instagram.com/p/{code}/embed/captioned/"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 "
-            "Mobile/15E148 Safari/604.1"
-        ),
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.instagram.com/",
-    }
-
-    try:
-        r = requests.get(embed_url, headers=headers, timeout=20)
-        if r.status_code == 200 and r.text:
-            m = re.search(
-                r'class="Caption"[^>]*>(.*?)</div>\s*<div class="CaptionComments"',
-                r.text,
-                re.I | re.S,
-            )
-            if not m:
-                m = re.search(r'class="Caption"[^>]*>(.*?)</div>', r.text, re.I | re.S)
-            if m:
-                raw = m.group(1)
-                raw = re.sub(
-                    r'<a class="CaptionUsername"[^>]*>.*?</a>',
-                    "",
-                    raw,
-                    flags=re.I | re.S,
-                )
-                raw = re.sub(r"<br\s*/?>", "\n", raw, flags=re.I)
-                raw = re.sub(r"<[^>]+>", "", raw)
-                caption = remove_bio_phrases(html.unescape(raw).strip())
-    except Exception as e:
-        print(f"[Refill] Embed fetch failed for {code}: {e}")
-
-    return {"caption": caption, "image_url": image_url}
-
-
-# --- RSS & BOT LOGIC ---
+# --- RSS ---
 def fetch_feed():
     rss_url = (
         "https://rss-bridge.org/bridge01/?action=display"
@@ -312,28 +318,57 @@ def fetch_feed():
 
 
 def send_post(entry):
-    image_url = entry.media_content[0]["url"] if "media_content" in entry else None
-    if not image_url and entry.get("link"):
-        image_url = media_url_from_link(entry.link)
+    """
+    Discover posts via RSS (link only is enough), then ALWAYS resolve
+    caption + image_url from the Instagram link before Telegram + Supabase.
+    """
+    post_link = entry.get("link")
+    if not post_link:
+        return
 
-    caption_body = extract_caption(entry)
-    caption = f"🎬 {caption_body}\n\n🔗 {entry.link}"[:1024]
+    # Primary source of truth: Instagram URL
+    ig = fetch_info_from_instagram_link(post_link)
+
+    # Fallback caption from RSS if embed returned nothing useful
+    if not ig["caption"] or ig["caption"] == "New post":
+        rss_cap = extract_caption_from_rss_entry(entry)
+        if rss_cap:
+            ig["caption"] = rss_cap
+
+    if not ig["image_url"]:
+        # RSS media as last resort
+        if "media_content" in entry and entry.media_content:
+            ig["image_url"] = entry.media_content[0].get("url") or ""
+        if not ig["image_url"]:
+            ig["image_url"] = media_url_from_link(post_link)
+
+    caption_body = ig["caption"]
+    image_url = ig["image_url"]
+    tg_caption = f"🎬 {caption_body}\n\n🔗 {get_clean_link(post_link)}"[:1024]
 
     if image_url:
         try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            response = requests.get(image_url, headers=headers, timeout=15)
-            if response.status_code == 200:
-                bot.send_photo(CHANNEL_ID, response.content, caption=caption)
+            headers = {
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://www.instagram.com/",
+            }
+            response = requests.get(image_url, headers=headers, timeout=20)
+            if response.status_code == 200 and "image" in response.headers.get(
+                "Content-Type", ""
+            ):
+                bot.send_photo(CHANNEL_ID, response.content, caption=tg_caption)
             else:
-                bot.send_message(CHANNEL_ID, caption)
+                bot.send_message(CHANNEL_ID, tg_caption)
         except Exception as e:
             print(f"[Send] Image error: {e}")
-            bot.send_message(CHANNEL_ID, caption)
+            bot.send_message(CHANNEL_ID, tg_caption)
     else:
-        bot.send_message(CHANNEL_ID, caption)
+        bot.send_message(CHANNEL_ID, tg_caption)
 
-    mark_as_sent(entry.link, caption_body, image_url or "")
+    # Store Instagram-resolved fields in Supabase
+    save_post_to_supabase(post_link, caption_body, image_url)
+    # Be polite between Instagram requests when posting batches
+    time.sleep(1.0)
 
 
 def process_new_posts():
@@ -344,13 +379,11 @@ def process_new_posts():
         for entry in reversed(entries):
             if not entry.get("link"):
                 continue
-
             if not is_link_sent(entry.link):
-                print(f"[Scheduler] New post: {extract_caption(entry)[:80]}...")
+                print(f"[Scheduler] New post link: {entry.link}")
                 send_post(entry)
                 new_count += 1
-                time.sleep(2)
-
+                time.sleep(1.5)
         print(f"[Scheduler] Check complete. Posted {new_count} item(s).")
     except Exception as e:
         print(f"[Scheduler] Error: {e}")
@@ -359,29 +392,10 @@ def process_new_posts():
 
 def refill_null_fields():
     """
-    Fill null/empty caption or image_url.
-    1) Match against live RSS feed
-    2) For the rest, fetch Instagram embed page + construct media URL
-       (works for posts still on Instagram but no longer in RSS)
+    For every row missing caption or image_url, use its stored Instagram
+    link to fetch and write the missing fields.
     """
-    print("[Refill] Starting backfill...")
-    entries = fetch_feed()
-
-    feed_map = {}
-    for entry in entries:
-        if not entry.get("link"):
-            continue
-        clean = get_clean_link(entry.link)
-        img = None
-        if "media_content" in entry and entry.media_content:
-            img = entry.media_content[0].get("url")
-        if not img:
-            img = media_url_from_link(entry.link)
-        feed_map[clean] = {
-            "caption": extract_caption(entry),
-            "image_url": img or "",
-        }
-
+    print("[Refill] Filling from Instagram links...")
     needs = get_rows_needing_refill()
     if not needs:
         return {
@@ -393,67 +407,46 @@ def refill_null_fields():
 
     updated = 0
     skipped = 0
-    from_rss = 0
-    from_ig = 0
 
     for row in needs:
-        clean = get_clean_link(row.get("link") or "")
-        if not clean:
+        link = row.get("link") or ""
+        if not instagram_shortcode(link):
             skipped += 1
             continue
+
+        ig = fetch_info_from_instagram_link(link)
 
         new_caption = row.get("caption")
         new_image = row.get("image_url")
-        source = None
 
-        if clean in feed_map:
-            data = feed_map[clean]
-            if not new_caption or not str(new_caption).strip():
-                new_caption = data["caption"]
-            if not new_image or not str(new_image).strip():
-                new_image = data["image_url"]
-            source = "rss"
-        else:
-            # Still on Instagram, but not in the short RSS window
-            data = fetch_instagram_post_meta(clean)
-            if not new_caption or not str(new_caption).strip():
-                new_caption = data.get("caption") or new_caption
-            if not new_image or not str(new_image).strip():
-                new_image = data.get("image_url") or media_url_from_link(clean)
-            source = "instagram"
-            # Be polite to Instagram
-            time.sleep(1.2)
+        if not new_caption or not str(new_caption).strip():
+            new_caption = ig["caption"]
+        if not new_image or not str(new_image).strip():
+            new_image = ig["image_url"] or media_url_from_link(link)
 
-        # Require at least one improvement
-        had_cap = bool(row.get("caption") and str(row.get("caption")).strip())
-        had_img = bool(row.get("image_url") and str(row.get("image_url")).strip())
         got_cap = bool(new_caption and str(new_caption).strip())
         got_img = bool(new_image and str(new_image).strip())
-
-        if (not had_cap and not got_cap) and (not had_img and not got_img):
+        if not got_cap and not got_img:
             skipped += 1
+            time.sleep(1.0)
             continue
 
         if update_post_fields(
-            clean,
+            link,
             caption=new_caption if got_cap else None,
             image_url=new_image if got_img else None,
         ):
             updated += 1
-            if source == "rss":
-                from_rss += 1
-            else:
-                from_ig += 1
-            print(f"[Refill] Updated ({source}): {clean}")
+            print(f"[Refill] Updated from IG link: {get_clean_link(link)}")
         else:
             skipped += 1
+
+        time.sleep(1.2)
 
     if updated > 0:
         message = (
             f"✅ Refill worked!\n"
-            f"• Updated: {updated} post(s)\n"
-            f"  – from RSS: {from_rss}\n"
-            f"  – from Instagram pages: {from_ig}\n"
+            f"• Updated: {updated} post(s) from Instagram links\n"
             f"• Skipped: {skipped}\n"
             f"Open the Mini App to see captions and pictures."
         )
@@ -463,7 +456,7 @@ def refill_null_fields():
             f"❌ Refill did not update any rows.\n"
             f"• Candidates: {len(needs)}\n"
             f"• Skipped: {skipped}\n"
-            f"Instagram may be rate-limiting; try again in a few minutes."
+            f"Instagram may be rate-limiting — try again in a few minutes."
         )
         ok = False
 
@@ -489,9 +482,11 @@ HELP_TEXT = (
     "/start — Confirm the bot is running\n"
     "/help — Show this help message\n"
     "/snd — Manually check for new Instagram posts and send them to the channel\n"
-    "/refill — Fill empty caption/image\\_url from RSS + Instagram pages "
+    "/refill — Fill empty caption/image\\_url using each row's Instagram link "
     "(alias: /backfill)\n\n"
-    "📱 Open the *Mini App* from the menu button to browse the 3D glass feed."
+    "📱 Open the *Mini App* from the menu button to browse the feed.\n\n"
+    "ℹ️ New posts always resolve caption + image from the Instagram URL "
+    "before saving to Supabase."
 )
 
 
@@ -515,8 +510,8 @@ def manual_send(message):
 def refill_command(message):
     bot.reply_to(
         message,
-        "🔄 Refilling empty caption/image_url…\n"
-        "Using live RSS + Instagram pages for older posts. This can take a minute.",
+        "🔄 Refilling from each post's Instagram link…\n"
+        "This may take a minute for older rows.",
     )
     try:
         result = refill_null_fields()
@@ -532,7 +527,7 @@ def start(message):
         message,
         "🤖 Bot is running and connected to Supabase.\n\n"
         "Type /help to see all commands.\n"
-        "Open the Mini App from the menu button for the 3D feed.",
+        "Open the Mini App from the menu button for the feed.",
     )
 
 
