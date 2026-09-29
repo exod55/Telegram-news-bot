@@ -3,381 +3,668 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <meta name="theme-color" content="#000000" />
-  <title>IGN Pulse</title>
+  <meta name="theme-color" content="#0a0a0f" />
+  <title>IGN Pulse — Entertainment Feed</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg: var(--tg-theme-bg-color, #000000);
-      --text: var(--tg-theme-text-color, #f5f5f5);
-      --muted: var(--tg-theme-hint-color, #a8a8a8);
-      --border: rgba(255, 255, 255, 0.12);
+      --bg: var(--tg-theme-bg-color, #0a0a0f);
+      --bg-elevated: var(--tg-theme-secondary-bg-color, #14141c);
+      --text: var(--tg-theme-text-color, #f4f4f8);
+      --text-muted: var(--tg-theme-hint-color, #9a9aad);
       --accent: var(--tg-theme-button-color, #e63946);
-      --accent-text: var(--tg-theme-button-text-color, #fff);
-      --bar: rgba(0, 0, 0, 0.92);
+      --accent-text: var(--tg-theme-button-text-color, #ffffff);
+      --card: rgba(255, 255, 255, 0.06);
+      --card-border: rgba(255, 255, 255, 0.1);
+      --glass: rgba(20, 20, 28, 0.72);
+      --shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+      --radius: 18px;
+      --header-h: 64px;
       --safe-top: env(safe-area-inset-top, 0px);
       --safe-bottom: env(safe-area-inset-bottom, 0px);
-      --header-h: 52px;
-      --gap: 2px;
+      --font-display: "Outfit", system-ui, sans-serif;
+      --font-body: "Inter", system-ui, sans-serif;
     }
 
     body.light-theme {
-      --bg: var(--tg-theme-bg-color, #fafafa);
-      --text: var(--tg-theme-text-color, #111);
-      --muted: var(--tg-theme-hint-color, #737373);
-      --border: rgba(0, 0, 0, 0.1);
-      --bar: rgba(255, 255, 255, 0.96);
+      --bg: var(--tg-theme-bg-color, #f5f5f7);
+      --bg-elevated: #ffffff;
+      --text: var(--tg-theme-text-color, #111118);
+      --text-muted: var(--tg-theme-hint-color, #6b6b7b);
+      --card: rgba(255, 255, 255, 0.85);
+      --card-border: rgba(0, 0, 0, 0.08);
+      --glass: rgba(255, 255, 255, 0.82);
+      --shadow: 0 12px 32px rgba(0, 0, 0, 0.1);
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     html, body {
-      height: 100%;
+      min-height: 100%;
       background: var(--bg);
       color: var(--text);
-      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: var(--font-body);
       -webkit-font-smoothing: antialiased;
       overflow-x: hidden;
     }
 
     body {
       padding-top: calc(var(--header-h) + var(--safe-top));
-      padding-bottom: var(--safe-bottom);
+      padding-bottom: calc(24px + var(--safe-bottom));
     }
 
-    /* ---- Top bar ---- */
+    /* --- Ambient canvas --- */
+    #canvas-container {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0.35;
+    }
+    body.light-theme #canvas-container { opacity: 0.18; }
+
+    /* --- Top bar --- */
     .topbar {
       position: fixed;
-      top: 0; left: 0; right: 0;
-      z-index: 40;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 50;
       height: calc(var(--header-h) + var(--safe-top));
-      padding: var(--safe-top) 12px 0;
+      padding: var(--safe-top) 16px 0;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      background: var(--bar);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      border-bottom: 1px solid var(--border);
+      gap: 12px;
+      background: var(--glass);
+      backdrop-filter: blur(20px) saturate(1.4);
+      -webkit-backdrop-filter: blur(20px) saturate(1.4);
+      border-bottom: 1px solid var(--card-border);
     }
 
     .brand {
       display: flex;
       align-items: center;
-      gap: 8px;
-      font-weight: 700;
-      font-size: 16px;
-      letter-spacing: -0.02em;
+      gap: 10px;
+      min-width: 0;
+      flex: 1;
     }
 
-    .brand span.mark {
-      width: 28px; height: 28px;
-      border-radius: 8px;
-      background: linear-gradient(135deg, #e63946, #ff6b35);
+    .brand-mark {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #e63946 0%, #ff6b35 50%, #f7c948 100%);
       display: grid;
       place-items: center;
-      font-size: 14px;
+      font-size: 18px;
+      flex-shrink: 0;
+      box-shadow: 0 4px 14px rgba(230, 57, 70, 0.35);
     }
 
-    .top-actions { display: flex; gap: 6px; }
+    .brand-text h1 {
+      font-family: var(--font-display);
+      font-size: 17px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+    }
+
+    .brand-text p {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .top-actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
 
     .icon-btn {
-      width: 36px; height: 36px;
-      border: none;
-      border-radius: 10px;
-      background: transparent;
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+      border: 1px solid var(--card-border);
+      background: var(--card);
       color: var(--text);
-      font-size: 18px;
-      cursor: pointer;
       display: grid;
       place-items: center;
+      cursor: pointer;
+      transition: transform 0.15s, background 0.15s;
+      font-size: 16px;
     }
-    .icon-btn:active { opacity: 0.6; }
+    .icon-btn:active { transform: scale(0.94); }
+    .icon-btn:hover { background: rgba(230, 57, 70, 0.15); }
 
-    /* ---- Instagram-style 3-column grid ---- */
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: var(--gap);
-      width: 100%;
-      max-width: 935px; /* IG desktop content width */
+    /* --- Hero strip --- */
+    .hero {
+      position: relative;
+      z-index: 1;
+      margin: 12px 16px 8px;
+      padding: 20px 18px;
+      border-radius: var(--radius);
+      background:
+        linear-gradient(135deg, rgba(230, 57, 70, 0.22), rgba(255, 107, 53, 0.08) 45%, transparent),
+        var(--card);
+      border: 1px solid var(--card-border);
+      overflow: hidden;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -20px;
+      top: -30px;
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(230, 57, 70, 0.35), transparent 70%);
+      pointer-events: none;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+
+    .hero-badge .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 3px rgba(230, 57, 70, 0.25);
+      animation: pulse 1.6s ease infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.55; transform: scale(0.85); }
+    }
+
+    .hero h2 {
+      font-family: var(--font-display);
+      font-size: clamp(20px, 4.5vw, 28px);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.2;
+      max-width: 28ch;
+    }
+
+    .hero p {
+      margin-top: 8px;
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.45;
+      max-width: 42ch;
+    }
+
+    /* --- Toolbar --- */
+    .toolbar {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      padding: 12px 16px 4px;
+      max-width: 1200px;
       margin: 0 auto;
     }
 
-    .grid-item {
+    .search-wrap {
+      flex: 1 1 200px;
       position: relative;
-      aspect-ratio: 1 / 1;
-      background: #1a1a1a;
-      overflow: hidden;
-      cursor: pointer;
-      -webkit-tap-highlight-color: transparent;
+      min-width: 0;
     }
 
-    body.light-theme .grid-item { background: #efefef; }
+    .search-wrap input {
+      width: 100%;
+      height: 44px;
+      border-radius: 12px;
+      border: 1px solid var(--card-border);
+      background: var(--card);
+      color: var(--text);
+      padding: 0 14px 0 40px;
+      font-size: 14px;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .search-wrap input:focus {
+      border-color: rgba(230, 57, 70, 0.55);
+      box-shadow: 0 0 0 3px rgba(230, 57, 70, 0.18);
+    }
+    .search-wrap input::placeholder { color: var(--text-muted); }
 
-    .grid-item img {
+    .search-icon {
+      position: absolute;
+      left: 13px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 14px;
+      opacity: 0.7;
+      pointer-events: none;
+    }
+
+    .chip-row {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: 2px;
+    }
+    .chip-row::-webkit-scrollbar { display: none; }
+
+    .chip {
+      flex-shrink: 0;
+      height: 34px;
+      padding: 0 14px;
+      border-radius: 999px;
+      border: 1px solid var(--card-border);
+      background: var(--card);
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .chip.active, .chip:hover {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--accent-text);
+    }
+
+    .stats-pill {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 500;
+      padding: 0 4px;
+    }
+
+    /* --- Feed grid --- */
+    .feed {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+      padding: 12px 16px 32px;
+      max-width: 1200px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    @media (min-width: 640px) {
+      .feed { grid-template-columns: repeat(2, 1fr); gap: 18px; }
+      .hero { margin: 16px 20px 8px; }
+      .toolbar { padding-left: 20px; padding-right: 20px; }
+      .feed { padding-left: 20px; padding-right: 20px; }
+    }
+
+    @media (min-width: 1024px) {
+      .feed { grid-template-columns: repeat(3, 1fr); gap: 22px; }
+      .hero { max-width: 1200px; margin-left: auto; margin-right: auto; }
+    }
+
+    /* Featured first card spans full width on larger screens */
+    @media (min-width: 640px) {
+      .post-card.featured {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: 1.15fr 1fr;
+        min-height: 280px;
+      }
+      .post-card.featured .media-wrap {
+        aspect-ratio: auto;
+        height: 100%;
+        min-height: 280px;
+      }
+      .post-card.featured .post-body {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+      .post-card.featured .caption {
+        font-size: 16px;
+        -webkit-line-clamp: 6;
+      }
+    }
+
+    @media (max-width: 639px) {
+      .post-card.featured { grid-column: auto; }
+    }
+
+    /* --- Cards --- */
+    .post-card {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      transform-style: preserve-3d;
+      will-change: transform;
+      animation: cardIn 0.45s ease both;
+    }
+
+    @keyframes cardIn {
+      from { opacity: 0; transform: translateY(16px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .post-card:hover {
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+    }
+
+    .media-wrap {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 10;
+      background:
+        linear-gradient(135deg, rgba(230, 57, 70, 0.12), rgba(80, 80, 120, 0.12)),
+        var(--bg-elevated);
+      overflow: hidden;
+    }
+
+    .media-wrap img {
       width: 100%;
       height: 100%;
       object-fit: cover;
       object-position: center;
       display: block;
-      transition: transform 0.25s ease;
+      transition: transform 0.4s ease;
     }
 
-    .grid-item:hover img { transform: scale(1.03); }
+    .post-card:hover .media-wrap img {
+      transform: scale(1.04);
+    }
 
-    .grid-item .overlay {
+    .media-placeholder {
       position: absolute;
       inset: 0;
-      background: rgba(0, 0, 0, 0.35);
-      opacity: 0;
-      transition: opacity 0.2s;
       display: grid;
       place-items: center;
+      font-size: 42px;
+      opacity: 0.35;
+    }
+
+    .tag-row {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      display: flex;
+      gap: 6px;
+      z-index: 2;
+    }
+
+    .tag {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 5px 9px;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.55);
       color: #fff;
-      font-size: 13px;
-      font-weight: 600;
-      pointer-events: none;
+      backdrop-filter: blur(8px);
     }
-    .grid-item:hover .overlay { opacity: 1; }
+    .tag.hot { background: linear-gradient(135deg, #e63946, #ff6b35); }
 
-    .grid-item .ph {
-      position: absolute;
-      inset: 0;
-      display: grid;
-      place-items: center;
-      font-size: 28px;
-      opacity: 0.3;
+    .post-body {
+      padding: 14px 16px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      flex: 1;
     }
 
-    /* ---- Empty / loading ---- */
+    .caption {
+      font-size: 14px;
+      line-height: 1.55;
+      font-weight: 500;
+      display: -webkit-box;
+      -webkit-line-clamp: 4;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      word-break: break-word;
+    }
+
+    .caption.expanded {
+      -webkit-line-clamp: unset;
+      display: block;
+    }
+
+    .read-more {
+      background: none;
+      border: none;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      padding: 0;
+      align-self: flex-start;
+      font-family: inherit;
+    }
+
+    .post-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: auto;
+      padding-top: 4px;
+    }
+
+    .meta {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .meta time { white-space: nowrap; }
+
+    .btn-open {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 36px;
+      padding: 0 14px;
+      border-radius: 10px;
+      background: var(--accent);
+      color: var(--accent-text);
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 700;
+      border: none;
+      cursor: pointer;
+      transition: filter 0.15s, transform 0.15s;
+      box-shadow: 0 4px 14px rgba(230, 57, 70, 0.3);
+    }
+    .btn-open:hover { filter: brightness(1.08); }
+    .btn-open:active { transform: scale(0.96); }
+
+    /* --- States --- */
     .state {
       grid-column: 1 / -1;
       text-align: center;
-      padding: 64px 20px;
-      color: var(--muted);
+      padding: 48px 20px;
+      color: var(--text-muted);
     }
-    .state h3 { color: var(--text); margin: 8px 0 4px; font-size: 16px; }
 
-    .skeleton-item {
-      aspect-ratio: 1 / 1;
-      background: linear-gradient(90deg, #1a1a1a, #2a2a2a, #1a1a1a);
+    .state .emoji { font-size: 40px; margin-bottom: 12px; }
+    .state h3 {
+      font-family: var(--font-display);
+      color: var(--text);
+      font-size: 18px;
+      margin-bottom: 6px;
+    }
+
+    .skeleton-grid {
+      display: contents;
+    }
+
+    .skeleton {
+      border-radius: var(--radius);
+      border: 1px solid var(--card-border);
+      background: var(--card);
+      overflow: hidden;
+      min-height: 280px;
+    }
+
+    .skeleton .sk-img {
+      aspect-ratio: 16 / 10;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
       background-size: 200% 100%;
       animation: shimmer 1.2s infinite;
     }
-    body.light-theme .skeleton-item {
-      background: linear-gradient(90deg, #eee, #f5f5f5, #eee);
-      background-size: 200% 100%;
+
+    .skeleton .sk-line {
+      height: 12px;
+      margin: 14px 16px;
+      border-radius: 6px;
+      background: rgba(128, 128, 140, 0.2);
+      animation: shimmer 1.2s infinite;
     }
+    .skeleton .sk-line.short { width: 55%; }
+
     @keyframes shimmer {
       0% { background-position: 200% 0; }
       100% { background-position: -200% 0; }
     }
 
-    /* ---- Detail view (1 post, full screen, scrollable) ---- */
-    .detail {
+    /* --- Floating refresh (mobile-friendly) --- */
+    .fab {
       position: fixed;
-      inset: 0;
-      z-index: 100;
-      background: var(--bg);
-      display: flex;
-      flex-direction: column;
-      transform: translateX(100%);
-      transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
-      visibility: hidden;
-    }
-
-    .detail.open {
-      transform: translateX(0);
-      visibility: visible;
-    }
-
-    .detail-header {
-      flex-shrink: 0;
-      height: calc(var(--header-h) + var(--safe-top));
-      padding: var(--safe-top) 8px 0;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      border-bottom: 1px solid var(--border);
-      background: var(--bar);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-    }
-
-    .detail-header .back {
-      width: 40px; height: 40px;
+      right: 16px;
+      bottom: calc(16px + var(--safe-bottom));
+      z-index: 40;
+      width: 52px;
+      height: 52px;
+      border-radius: 16px;
       border: none;
-      background: transparent;
-      color: var(--text);
-      font-size: 22px;
-      cursor: pointer;
-      display: grid;
-      place-items: center;
-      border-radius: 10px;
-    }
-
-    .detail-header .title {
-      font-weight: 700;
-      font-size: 15px;
-      flex: 1;
-    }
-
-    .detail-scroll {
-      flex: 1;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-      overscroll-behavior: contain;
-    }
-
-    .detail-media {
-      width: 100%;
-      max-width: 600px;
-      margin: 0 auto;
-      background: #0d0d0d;
-      position: relative;
-    }
-
-    body.light-theme .detail-media { background: #f0f0f0; }
-
-    /* Show full image without aggressive crop */
-    .detail-media img {
-      width: 100%;
-      height: auto;
-      max-height: min(75vh, 800px);
-      object-fit: contain;
-      object-position: center;
-      display: block;
-      margin: 0 auto;
-      background: #000;
-    }
-
-    body.light-theme .detail-media img { background: #f0f0f0; }
-
-    .detail-media .ph {
-      aspect-ratio: 1;
-      display: grid;
-      place-items: center;
-      font-size: 48px;
-      opacity: 0.3;
-    }
-
-    .detail-body {
-      max-width: 600px;
-      margin: 0 auto;
-      padding: 16px 16px calc(24px + var(--safe-bottom));
-      width: 100%;
-    }
-
-    .detail-meta {
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 10px;
-      font-weight: 500;
-    }
-
-    .detail-caption {
-      font-size: 15px;
-      line-height: 1.55;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-
-    .detail-actions {
-      display: flex;
-      gap: 10px;
-      margin-top: 18px;
-    }
-
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      height: 42px;
-      padding: 0 16px;
-      border-radius: 12px;
-      font-size: 14px;
-      font-weight: 600;
-      text-decoration: none;
-      border: none;
-      cursor: pointer;
-      font-family: inherit;
-    }
-
-    .btn-primary {
       background: var(--accent);
       color: var(--accent-text);
-      flex: 1;
+      font-size: 20px;
+      box-shadow: 0 8px 24px rgba(230, 57, 70, 0.4);
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      transition: transform 0.2s;
+    }
+    .fab:active { transform: scale(0.92) rotate(90deg); }
+    .fab.spinning { animation: spin 0.8s linear infinite; }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
     }
 
-    .btn-ghost {
-      background: transparent;
-      color: var(--text);
-      border: 1px solid var(--border);
-    }
-
-    /* Desktop: slightly larger gap, centered grid */
-    @media (min-width: 736px) {
-      :root { --gap: 4px; }
-      .grid { margin-top: 8px; margin-bottom: 24px; border-radius: 4px; overflow: hidden; }
-    }
-
-    @media (min-width: 1024px) {
-      .detail-media img { max-height: 80vh; }
+    .footer-note {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      font-size: 11px;
+      color: var(--text-muted);
+      padding: 8px 16px 24px;
+      max-width: 1200px;
+      margin: 0 auto;
     }
   </style>
 </head>
 <body>
+  <div id="canvas-container"></div>
+
   <header class="topbar">
     <div class="brand">
-      <span class="mark">🎮</span>
-      IGN Pulse
+      <div class="brand-mark">🎮</div>
+      <div class="brand-text">
+        <h1>IGN Pulse</h1>
+        <p>Games · Movies · Shows</p>
+      </div>
     </div>
     <div class="top-actions">
-      <button class="icon-btn" id="btn-theme" type="button" aria-label="Theme">🌓</button>
-      <button class="icon-btn" id="btn-refresh" type="button" aria-label="Refresh">↻</button>
+      <button class="icon-btn" id="btn-theme" title="Theme" type="button" aria-label="Theme">🌓</button>
+      <button class="icon-btn" id="btn-refresh" title="Refresh" type="button" aria-label="Refresh">↻</button>
     </div>
   </header>
 
-  <main id="grid" class="grid" aria-label="Post grid"></main>
+  <section class="hero">
+    <div class="hero-badge"><span class="dot"></span> Live feed</div>
+    <h2>Latest from the entertainment desk</h2>
+    <p>Fresh headlines, reviews, and trailers — auto-synced from Instagram into your Telegram Mini App.</p>
+  </section>
 
-  <!-- Single-post detail (1 grid / full post) -->
-  <div class="detail" id="detail" role="dialog" aria-modal="true" aria-hidden="true">
-    <div class="detail-header">
-      <button class="back" id="detail-back" type="button" aria-label="Back">←</button>
-      <div class="title">Post</div>
+  <div class="toolbar">
+    <div class="search-wrap">
+      <span class="search-icon">🔍</span>
+      <input id="search" type="search" placeholder="Search headlines…" autocomplete="off" />
     </div>
-    <div class="detail-scroll" id="detail-scroll">
-      <div class="detail-media" id="detail-media"></div>
-      <div class="detail-body">
-        <div class="detail-meta" id="detail-meta"></div>
-        <p class="detail-caption" id="detail-caption"></p>
-        <div class="detail-actions">
-          <a class="btn btn-primary" id="detail-open" href="#" target="_blank" rel="noopener">Open on Instagram</a>
-        </div>
-      </div>
+    <div class="chip-row" id="chips">
+      <button class="chip active" data-filter="all" type="button">All</button>
+      <button class="chip" data-filter="games" type="button">Games</button>
+      <button class="chip" data-filter="movies" type="button">Movies</button>
+      <button class="chip" data-filter="tv" type="button">TV</button>
+      <button class="chip" data-filter="tech" type="button">Tech</button>
     </div>
+    <span class="stats-pill" id="stats">—</span>
   </div>
+
+  <main id="feed" class="feed" aria-live="polite"></main>
+
+  <p class="footer-note">Powered by Telegram · Images proxied for reliable mobile viewing</p>
+
+  <button class="fab" id="fab-refresh" type="button" title="Refresh feed" aria-label="Refresh">↻</button>
 
   <script>
     const tg = window.Telegram?.WebApp;
     if (tg) {
       tg.ready();
       tg.expand();
-      try { tg.setHeaderColor("bg_color"); } catch (_) {}
+      try { tg.setHeaderColor("secondary_bg_color"); } catch (_) {}
       try { tg.setBackgroundColor("bg_color"); } catch (_) {}
     }
 
     const API_URL = "/api/posts";
-    let posts = [];
+    let allPosts = [];
+    let activeFilter = "all";
+    let query = "";
+
+    const FILTER_KEYWORDS = {
+      games: ["game", "gaming", "playstation", "xbox", "nintendo", "fortnite", "steam", "rpg", "fps", "console", "esports"],
+      movies: ["movie", "film", "cinema", "trailer", "box office", "hollywood", "marvel", "star wars", "hollywood"],
+      tv: ["tv", "series", "episode", "season", "show", "streaming", "netflix", "hbo", "disney+", "lanterns"],
+      tech: ["tech", "ai", "apple", "google", "microsoft", "gadget", "phone", "vr", "ar"],
+    };
 
     function applyTheme(force) {
       const scheme = force || (tg?.colorScheme || "dark");
-      document.body.classList.toggle("light-theme", scheme === "light");
+      if (scheme === "light") {
+        document.body.classList.add("light-theme");
+      } else {
+        document.body.classList.remove("light-theme");
+      }
     }
     applyTheme();
     if (tg) tg.onEvent("themeChanged", () => applyTheme());
@@ -386,6 +673,52 @@
       document.body.classList.toggle("light-theme");
     });
 
+    // --- Three.js subtle background ---
+    (function initBg() {
+      const container = document.getElementById("canvas-container");
+      if (!window.THREE) return;
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+      const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      container.appendChild(renderer.domElement);
+
+      const geo = new THREE.IcosahedronGeometry(1, 0);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xe63946,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.35,
+      });
+      const shapes = [];
+      for (let i = 0; i < 6; i++) {
+        const mesh = new THREE.Mesh(geo, mat.clone());
+        mesh.position.set((Math.random() - 0.5) * 12, (Math.random() - 0.5) * 10, (Math.random() - 0.5) * 6 - 3);
+        mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, 0);
+        mesh.scale.setScalar(0.6 + Math.random() * 1.2);
+        scene.add(mesh);
+        shapes.push(mesh);
+      }
+      camera.position.z = 6;
+
+      function animate() {
+        requestAnimationFrame(animate);
+        shapes.forEach((s, i) => {
+          s.rotation.x += 0.0015 + i * 0.0002;
+          s.rotation.y += 0.002 + i * 0.0003;
+        });
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    })();
+
     function escapeHtml(str) {
       if (!str) return "";
       return String(str)
@@ -393,25 +726,6 @@
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
-    }
-
-    // Client-side safety net for any leftover CTAs
-    function cleanCaption(text) {
-      if (!text) return "";
-      let t = String(text);
-      const patterns = [
-        /\s*link\s+in\s+(?:the\s+)?(?:bio|comments?)\b[^.!\n]*[.!]?/gi,
-        /\s*read\s+more\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?/gi,
-        /\s*full\s+(?:review|article|story)\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?/gi,
-        /\s*more\s+(?:info|details?|here)\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?/gi,
-        /\s*(?:check|see|click)(?:\s+out)?\s+(?:the\s+)?link\s+in\s+bio\b[^.!\n]*[.!]?/gi,
-        /\s*link\s+in\s+bio\b[.!]?/gi,
-        /\s*(?:check|see|click)(?:\s+out)?\s+the\s*$/gi,
-        /\s*view\s+all\s+\d+\s+comments\b[.!]?/gi,
-        /\s*\.{2,}\s*$/g,
-      ];
-      for (const p of patterns) t = t.replace(p, "");
-      return t.replace(/[ \t]+/g, " ").trim().replace(/^[.\-–—|\s]+|[.\-–—|\s]+$/g, "");
     }
 
     function imageSrc(url) {
@@ -423,151 +737,190 @@
       if (!iso) return "";
       try {
         const d = new Date(iso);
-        const diff = (Date.now() - d) / 1000;
+        const now = new Date();
+        const diff = (now - d) / 1000;
         if (diff < 60) return "Just now";
         if (diff < 3600) return Math.floor(diff / 60) + "m ago";
         if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
         if (diff < 604800) return Math.floor(diff / 86400) + "d ago";
-        return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-      } catch { return ""; }
-    }
-
-    function showSkeletons() {
-      const grid = document.getElementById("grid");
-      grid.innerHTML = "";
-      for (let i = 0; i < 12; i++) {
-        const el = document.createElement("div");
-        el.className = "skeleton-item";
-        grid.appendChild(el);
+        return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+      } catch {
+        return "";
       }
     }
 
-    function renderGrid() {
-      const grid = document.getElementById("grid");
-      if (!posts.length) {
-        grid.innerHTML = `
+    function guessTag(caption) {
+      const t = (caption || "").toLowerCase();
+      for (const [key, words] of Object.entries(FILTER_KEYWORDS)) {
+        if (words.some((w) => t.includes(w))) return key;
+      }
+      return "news";
+    }
+
+    function matchesFilter(post, filter) {
+      if (filter === "all") return true;
+      const tag = guessTag(post.caption);
+      return tag === filter;
+    }
+
+    function matchesQuery(post, q) {
+      if (!q) return true;
+      return (post.caption || "").toLowerCase().includes(q.toLowerCase());
+    }
+
+    function showSkeletons() {
+      const feed = document.getElementById("feed");
+      feed.innerHTML = "";
+      for (let i = 0; i < 6; i++) {
+        const el = document.createElement("div");
+        el.className = "skeleton";
+        el.innerHTML = `<div class="sk-img"></div><div class="sk-line"></div><div class="sk-line short"></div>`;
+        feed.appendChild(el);
+      }
+    }
+
+    function render() {
+      const feed = document.getElementById("feed");
+      const filtered = allPosts.filter(
+        (p) => matchesFilter(p, activeFilter) && matchesQuery(p, query)
+      );
+
+      document.getElementById("stats").textContent =
+        filtered.length + " stor" + (filtered.length === 1 ? "y" : "ies");
+
+      if (!filtered.length) {
+        feed.innerHTML = `
           <div class="state">
-            <div style="font-size:36px">📭</div>
-            <h3>No posts yet</h3>
-            <p>New posts will show up here in a 3-column grid.</p>
+            <div class="emoji">📭</div>
+            <h3>No stories found</h3>
+            <p>Try another filter or clear the search.</p>
           </div>`;
         return;
       }
 
-      grid.innerHTML = "";
-      posts.forEach((post, index) => {
-        const item = document.createElement("button");
-        item.type = "button";
-        item.className = "grid-item";
-        item.setAttribute("aria-label", "Open post");
-        const src = imageSrc(post.image_url);
+      feed.innerHTML = "";
+      filtered.forEach((post, index) => {
+        const card = document.createElement("article");
+        card.className = "post-card" + (index === 0 && !query && activeFilter === "all" ? " featured" : "");
+        card.style.animationDelay = Math.min(index, 8) * 0.05 + "s";
 
-        item.innerHTML = `
-          <div class="ph">🎬</div>
-          ${src ? `<img src="${escapeHtml(src)}" alt="" loading="lazy" decoding="async" />` : ""}
-          <div class="overlay">View</div>
+        const tag = guessTag(post.caption);
+        const tagLabel = tag === "news" ? "Spotlight" : tag.charAt(0).toUpperCase() + tag.slice(1);
+        const src = imageSrc(post.image_url);
+        const caption = post.caption || "No caption provided.";
+        const long = caption.length > 160;
+
+        card.innerHTML = `
+          <div class="media-wrap">
+            <div class="media-placeholder">🎬</div>
+            ${src ? `<img src="${escapeHtml(src)}" alt="" loading="lazy" decoding="async" />` : ""}
+            <div class="tag-row">
+              <span class="tag${index === 0 ? " hot" : ""}">${escapeHtml(tagLabel)}</span>
+            </div>
+          </div>
+          <div class="post-body">
+            <p class="caption" data-full="${escapeHtml(caption)}">${escapeHtml(caption)}</p>
+            ${long ? `<button class="read-more" type="button">Read more</button>` : ""}
+            <div class="post-footer">
+              <div class="meta">
+                <span>📅</span>
+                <time>${escapeHtml(formatDate(post.created_at))}</time>
+              </div>
+              <a class="btn-open" href="${escapeHtml(post.link || "#")}" target="_blank" rel="noopener">
+                Open <span aria-hidden="true">→</span>
+              </a>
+            </div>
+          </div>
         `;
 
-        const img = item.querySelector("img");
+        const img = card.querySelector("img");
         if (img) {
           img.addEventListener("load", () => {
-            const ph = item.querySelector(".ph");
+            const ph = card.querySelector(".media-placeholder");
             if (ph) ph.style.display = "none";
           });
-          img.addEventListener("error", () => { img.style.display = "none"; });
+          img.addEventListener("error", () => {
+            img.style.display = "none";
+          });
         }
 
-        item.addEventListener("click", () => openDetail(index));
-        grid.appendChild(item);
+        const readBtn = card.querySelector(".read-more");
+        if (readBtn) {
+          readBtn.addEventListener("click", () => {
+            const cap = card.querySelector(".caption");
+            const open = cap.classList.toggle("expanded");
+            readBtn.textContent = open ? "Show less" : "Read more";
+          });
+        }
+
+        // Subtle 3D tilt on pointer devices only
+        if (window.matchMedia("(hover: hover)").matches) {
+          card.addEventListener("mousemove", (e) => {
+            const rect = card.getBoundingClientRect();
+            const x = e.clientX - rect.left - rect.width / 2;
+            const y = e.clientY - rect.top - rect.height / 2;
+            card.style.transform = `rotateY(${x / 28}deg) rotateX(${-y / 28}deg)`;
+          });
+          card.addEventListener("mouseleave", () => {
+            card.style.transform = "";
+          });
+        }
+
+        feed.appendChild(card);
       });
     }
 
-    function openDetail(index) {
-      const post = posts[index];
-      if (!post) return;
-
-      const media = document.getElementById("detail-media");
-      const caption = cleanCaption(post.caption) || "No caption.";
-      const src = imageSrc(post.image_url);
-
-      media.innerHTML = src
-        ? `<img src="${escapeHtml(src)}" alt="" />`
-        : `<div class="ph">🎬</div>`;
-
-      const img = media.querySelector("img");
-      if (img) {
-        img.addEventListener("error", () => {
-          media.innerHTML = `<div class="ph">🎬</div>`;
-        });
-      }
-
-      document.getElementById("detail-meta").textContent = formatDate(post.created_at);
-      document.getElementById("detail-caption").textContent = caption;
-
-      const openBtn = document.getElementById("detail-open");
-      openBtn.href = post.link || "#";
-
-      const detail = document.getElementById("detail");
-      detail.classList.add("open");
-      detail.setAttribute("aria-hidden", "false");
-      document.getElementById("detail-scroll").scrollTop = 0;
-
-      // Telegram back button if available
-      if (tg?.BackButton) {
-        tg.BackButton.show();
-        tg.BackButton.onClick(closeDetail);
-      }
-    }
-
-    function closeDetail() {
-      const detail = document.getElementById("detail");
-      detail.classList.remove("open");
-      detail.setAttribute("aria-hidden", "true");
-      if (tg?.BackButton) {
-        tg.BackButton.hide();
-        try { tg.BackButton.offClick(closeDetail); } catch (_) {}
-      }
-    }
-
-    document.getElementById("detail-back").addEventListener("click", closeDetail);
-
-    // Swipe-from-left edge to close (mobile)
-    let touchStartX = 0;
-    document.getElementById("detail").addEventListener("touchstart", (e) => {
-      touchStartX = e.touches[0].clientX;
-    }, { passive: true });
-    document.getElementById("detail").addEventListener("touchend", (e) => {
-      const dx = e.changedTouches[0].clientX - touchStartX;
-      if (touchStartX < 40 && dx > 80) closeDetail();
-    }, { passive: true });
-
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") closeDetail();
-    });
-
     async function fetchPosts() {
+      const fab = document.getElementById("fab-refresh");
+      const btn = document.getElementById("btn-refresh");
+      fab.classList.add("spinning");
+      btn.style.opacity = "0.5";
       showSkeletons();
+
       try {
         const res = await fetch(API_URL);
         const data = await res.json();
         if (!data.ok) throw new Error(data.error || "API error");
-        posts = (data.posts || []).map((p) => ({
-          ...p,
-          caption: cleanCaption(p.caption),
-        }));
-        renderGrid();
+        allPosts = data.posts || [];
+        render();
       } catch (err) {
         console.error(err);
-        document.getElementById("grid").innerHTML = `
+        document.getElementById("feed").innerHTML = `
           <div class="state">
-            <div style="font-size:36px">⚠️</div>
-            <h3>Couldn't load posts</h3>
-            <p>Tap refresh and try again.</p>
+            <div class="emoji">⚠️</div>
+            <h3>Couldn't load the feed</h3>
+            <p>Check your connection and tap refresh.</p>
           </div>`;
+      } finally {
+        fab.classList.remove("spinning");
+        btn.style.opacity = "1";
       }
     }
 
+    // Search
+    const searchInput = document.getElementById("search");
+    let searchTimer;
+    searchInput.addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        query = searchInput.value.trim();
+        render();
+      }, 180);
+    });
+
+    // Chips
+    document.getElementById("chips").addEventListener("click", (e) => {
+      const chip = e.target.closest(".chip");
+      if (!chip) return;
+      document.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
+      chip.classList.add("active");
+      activeFilter = chip.dataset.filter;
+      render();
+    });
+
     document.getElementById("btn-refresh").addEventListener("click", fetchPosts);
+    document.getElementById("fab-refresh").addEventListener("click", fetchPosts);
+
     fetchPosts();
   </script>
 </body>
