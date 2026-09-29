@@ -486,12 +486,39 @@ def run_scheduler():
 
 
 
-def edit_posts_on_telegram():
+def send_channel_post(caption_body, image_url, post_link):
+    """Send photo/text to the channel; return message_id or None."""
+    tg_caption = f"🎬 {caption_body}\n\n🔗 {get_clean_link(post_link)}"[:1024]
+    msg = None
+    if image_url:
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://www.instagram.com/",
+            }
+            response = requests.get(image_url, headers=headers, timeout=20)
+            if response.status_code == 200 and "image" in response.headers.get(
+                "Content-Type", ""
+            ):
+                msg = bot.send_photo(CHANNEL_ID, response.content, caption=tg_caption)
+            else:
+                msg = bot.send_message(CHANNEL_ID, tg_caption)
+        except Exception as e:
+            print(f"[Send] Image error: {e}")
+            msg = bot.send_message(CHANNEL_ID, tg_caption)
+    else:
+        msg = bot.send_message(CHANNEL_ID, tg_caption)
+    return getattr(msg, "message_id", None) if msg is not None else None
+
+
+def edit_posts_on_telegram(repost_if_missing=False):
     """
     For each stored Instagram link: fetch full caption (no link-in-bio),
-    update Supabase, and edit the Telegram channel message when message_id exists.
+    update Supabase, and:
+      - edit Telegram message if telegram_message_id exists
+      - OR, if repost_if_missing=True, send a NEW channel post and store its message_id
     """
-    print("[EditPost] Starting...")
+    print(f"[EditPost] Starting (repost_if_missing={repost_if_missing})...")
     try:
         response = (
             supabase.table("posted_links")
@@ -515,8 +542,25 @@ def edit_posts_on_telegram():
             "message": "✅ No posts found in Supabase.",
         }
 
+    # Count how many lack message ids
+    missing_ids = sum(1 for r in rows if not r.get("telegram_message_id"))
+
+    if missing_ids == len(rows) and not repost_if_missing:
+        return {
+            "ok": False,
+            "changed": 0,
+            "message": (
+                "⚠️ All posts have no telegram_message_id — Telegram cannot edit them.\n\n"
+                "Supabase captions can still be updated, but channel messages need a repost.\n\n"
+                "Run this to repost with full captions and save new message ids:\n"
+                "/edit_post repost\n\n"
+                f"({missing_ids} posts would be sent to the channel again.)"
+            ),
+        }
+
     changed = 0
     tg_edited = 0
+    tg_reposted = 0
     db_only = 0
     skipped = 0
     errors = 0
@@ -530,18 +574,19 @@ def edit_posts_on_telegram():
         try:
             ig = fetch_info_from_instagram_link(link)
             new_caption = remove_bio_phrases(ig.get("caption") or "") or "New post"
-            new_image = ig.get("image_url") or media_url_from_link(link) or row.get("image_url") or ""
-
-            old_caption = (row.get("caption") or "").strip()
-            caption_changed = remove_bio_phrases(old_caption) != new_caption or old_caption != new_caption
-
-            # Always write cleaned full caption + image to Supabase
-            update_post_fields(link, caption=new_caption, image_url=new_image)
+            new_image = (
+                ig.get("image_url")
+                or media_url_from_link(link)
+                or row.get("image_url")
+                or ""
+            )
 
             msg_id = row.get("telegram_message_id")
             tg_caption = f"🎬 {new_caption}\n\n🔗 {get_clean_link(link)}"[:1024]
 
             edited_tg = False
+            reposted = False
+
             if msg_id:
                 try:
                     bot.edit_message_caption(
@@ -551,8 +596,7 @@ def edit_posts_on_telegram():
                     )
                     edited_tg = True
                     tg_edited += 1
-                except Exception as e:
-                    # Maybe it was a text-only message
+                except Exception:
                     try:
                         bot.edit_message_text(
                             tg_caption,
@@ -563,12 +607,39 @@ def edit_posts_on_telegram():
                         tg_edited += 1
                     except Exception as e2:
                         print(f"[EditPost] TG edit failed for {link}: {e2}")
-                        db_only += 1
+                        if repost_if_missing:
+                            new_id = send_channel_post(new_caption, new_image, link)
+                            if new_id:
+                                msg_id = new_id
+                                reposted = True
+                                tg_reposted += 1
+                            else:
+                                db_only += 1
+                        else:
+                            db_only += 1
             else:
-                db_only += 1
+                if repost_if_missing:
+                    new_id = send_channel_post(new_caption, new_image, link)
+                    if new_id:
+                        msg_id = new_id
+                        reposted = True
+                        tg_reposted += 1
+                    else:
+                        db_only += 1
+                else:
+                    db_only += 1
+
+            # Always update Supabase caption/image; store message id when we edited or reposted
+            kwargs = {"caption": new_caption, "image_url": new_image}
+            if edited_tg or reposted:
+                kwargs["telegram_message_id"] = msg_id
+            update_post_fields(link, **kwargs)
 
             changed += 1
-            print(f"[EditPost] Updated {get_clean_link(link)} tg={edited_tg}")
+            print(
+                f"[EditPost] {get_clean_link(link)} "
+                f"edit={edited_tg} repost={reposted}"
+            )
         except Exception as e:
             errors += 1
             print(f"[EditPost] Error on {link}: {e}")
@@ -579,7 +650,8 @@ def edit_posts_on_telegram():
         f"✅ /edit_post finished\n"
         f"• Posts processed: {changed}\n"
         f"• Telegram captions edited: {tg_edited}\n"
-        f"• Supabase-only (no message id): {db_only}\n"
+        f"• Telegram reposted (new message ids): {tg_reposted}\n"
+        f"• Supabase-only: {db_only}\n"
         f"• Skipped: {skipped}\n"
         f"• Errors: {errors}"
     )
@@ -593,16 +665,15 @@ def edit_posts_on_telegram():
     return {"ok": ok, "changed": changed, "message": message}
 
 
-
 HELP_TEXT = (
     "🤖 *Bot commands*\n\n"
     "/start — Confirm the bot is running\n"
     "/help — Show this help message\n"
     "/snd — Manually check for new Instagram posts and send them to the channel\n"
-    "/refill — Fill empty caption/image\\_url using each row's Instagram link "
+    "/refill — Fill empty caption/image_url using each row's Instagram link "
     "(alias: /backfill)\n"
-    "/edit_post — Re-fetch full captions from Instagram (no link-in-bio), "
-    "update Supabase and edit Telegram channel posts\n\n"
+    "/edit_post — Update captions from Instagram; edit Telegram if message id exists\n"
+    "/edit_post repost — Repost to channel when message id is missing (saves new ids)\n\n"
     "📱 Open the *Mini App* from the menu button to browse the feed."
 )
 
@@ -640,13 +711,25 @@ def refill_command(message):
 
 @bot.message_handler(commands=["edit_post"])
 def edit_post_command(message):
-    bot.reply_to(
-        message,
-        "✏️ Updating captions from each Instagram link…\n"
-        "Edits Telegram posts when message ids are stored. This can take a few minutes.",
-    )
+    parts = (message.text or "").split()
+    repost = any(p.lower() in ("repost", "resend", "force") for p in parts[1:])
+
+    if repost:
+        bot.reply_to(
+            message,
+            "✏️ Updating from Instagram links…\n"
+            "Posts without a message id will be REPOSTED to the channel "
+            "with full captions. This can take a few minutes.",
+        )
+    else:
+        bot.reply_to(
+            message,
+            "✏️ Updating captions from each Instagram link…\n"
+            "Edits Telegram posts when message ids are stored.\n"
+            "If all ids are missing, you will be told to run /edit_post repost.",
+        )
     try:
-        result = edit_posts_on_telegram()
+        result = edit_posts_on_telegram(repost_if_missing=repost)
         bot.reply_to(message, result["message"])
     except Exception as e:
         traceback.print_exc()
