@@ -7,7 +7,7 @@ import html
 import feedparser
 import telebot
 import requests
-from flask import Flask
+from flask import Flask, jsonify, send_from_directory
 from supabase import create_client
 
 # --- CONFIGURATION ---
@@ -20,37 +20,113 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 bot = telebot.TeleBot(BOT_TOKEN)
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", static_url_path="")
 
 
 @app.route("/")
 def home():
+    """Serve the Mini App frontend."""
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.route("/api/posts")
+def get_posts():
+    """JSON feed for the Telegram Mini App."""
+    try:
+        response = (
+            supabase.table("posted_links")
+            .select("id, link, caption, image_url, created_at")
+            .order("created_at", desc=True)
+            .limit(25)
+            .execute()
+        )
+        return jsonify({"ok": True, "posts": response.data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/health")
+def health():
     return "Bot is live!"
 
 
 # --- DATABASE FUNCTIONS ---
 def get_clean_link(link):
-    """Removes tracking junk (like ?igshid=) and trailing slashes."""
+    """Removes tracking junk and trailing slashes."""
     return link.split("?")[0].rstrip("/")
 
 
 def is_link_sent(link):
     clean_link = get_clean_link(link)
-    response = supabase.table("posted_links").select("link").eq("link", clean_link).execute()
+    response = (
+        supabase.table("posted_links")
+        .select("link")
+        .eq("link", clean_link)
+        .execute()
+    )
     return len(response.data) > 0
 
 
-def mark_as_sent(link):
+def mark_as_sent(link, caption="", image_url=""):
     clean_link = get_clean_link(link)
     try:
-        supabase.table("posted_links").insert({"link": clean_link}).execute()
+        supabase.table("posted_links").insert(
+            {
+                "link": clean_link,
+                "caption": caption,
+                "image_url": image_url,
+            }
+        ).execute()
     except Exception as e:
         print(f"Database insertion error (likely duplicate): {e}")
 
 
+def update_post_fields(link, caption=None, image_url=None):
+    """Update caption and/or image_url for an existing row."""
+    clean_link = get_clean_link(link)
+    payload = {}
+    if caption is not None:
+        payload["caption"] = caption
+    if image_url is not None:
+        payload["image_url"] = image_url
+    if not payload:
+        return False
+    try:
+        supabase.table("posted_links").update(payload).eq("link", clean_link).execute()
+        return True
+    except Exception as e:
+        print(f"Database update error: {e}")
+        return False
+
+
+def get_rows_needing_refill():
+    """
+    Rows where caption or image_url is null or empty.
+    Fetches in pages to stay within API limits.
+    """
+    try:
+        response = (
+            supabase.table("posted_links")
+            .select("id, link, caption, image_url")
+            .order("created_at", desc=True)
+            .limit(200)
+            .execute()
+        )
+        rows = response.data or []
+        needs = []
+        for row in rows:
+            cap = row.get("caption")
+            img = row.get("image_url")
+            if not cap or not str(cap).strip() or not img or not str(img).strip():
+                needs.append(row)
+        return needs
+    except Exception as e:
+        print(f"[Refill] Error listing rows: {e}")
+        return []
+
+
 # --- CAPTION HELPERS ---
 def strip_html(text):
-    """Remove HTML tags and decode entities."""
     if not text:
         return ""
     text = html.unescape(text)
@@ -62,28 +138,15 @@ def strip_html(text):
 
 
 def remove_bio_phrases(text):
-    """
-    Strip Instagram-style endings like:
-    - Link in bio for more.
-    - Link in the comments for more info.
-    - Read more in bio.
-    - Full review in bio.
-    """
     if not text:
         return text
 
     patterns = [
-        # "Link in bio for more / for our full review / for more info."
         r"(?i)\s*link\s+in\s+(?:the\s+)?(?:bio|comments?)\b[^.]*\.?\s*$",
-        # "Read more in bio."
         r"(?i)\s*read\s+more\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        # "Full review / article / story in bio."
         r"(?i)\s*full\s+(?:review|article|story)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        # "More info / details in bio."
         r"(?i)\s*more\s+(?:info|details?|here)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        # Trailing "Link in bio" without extra words
         r"(?i)\s*link\s+in\s+bio\.?\s*$",
-        # Trailing ellipsis often left after truncation before "Link in..."
         r"\s*\.{2,}\s*$",
     ]
 
@@ -95,18 +158,11 @@ def remove_bio_phrases(text):
 
 
 def extract_caption(entry):
-    """
-    Prefer the longer plain-text body from description/summary;
-    fall back to title. Then remove bio-link phrases.
-    """
     candidates = []
-
-    # description / summary often has the fuller caption (after the img tag)
     for key in ("summary", "description"):
         raw = entry.get(key)
         if raw:
             plain = strip_html(raw)
-            # Drop pure image-alt leftovers that are just the truncated title
             if plain:
                 candidates.append(plain)
 
@@ -114,18 +170,16 @@ def extract_caption(entry):
     if title:
         candidates.append(title)
 
-    # Pick the longest non-empty candidate
     caption = max(candidates, key=len) if candidates else ""
     caption = remove_bio_phrases(caption)
 
-    # If still empty, use a generic fallback
     if not caption:
         caption = "New post"
 
     return caption
 
 
-# --- RSS FUNCTIONS ---
+# --- RSS & BOT LOGIC ---
 def fetch_feed():
     rss_url = (
         "https://rss-bridge.org/bridge01/?action=display"
@@ -147,7 +201,6 @@ def fetch_feed():
 def send_post(entry):
     image_url = entry.media_content[0]["url"] if "media_content" in entry else None
     caption_body = extract_caption(entry)
-    # Caption + link; Telegram photo caption limit is 1024 chars
     caption = f"🎬 {caption_body}\n\n🔗 {entry.link}"[:1024]
 
     if image_url:
@@ -164,45 +217,102 @@ def send_post(entry):
     else:
         bot.send_message(CHANNEL_ID, caption)
 
+    mark_as_sent(entry.link, caption_body, image_url or "")
 
-# --- AUTOMATION ---
+
 def process_new_posts():
     print("[Scheduler] Checking for new posts...")
     try:
         entries = fetch_feed()
         new_count = 0
-        # Process in reverse (oldest to newest) to preserve order
         for entry in reversed(entries):
             if not entry.get("link"):
                 continue
 
             if not is_link_sent(entry.link):
-                print(f"[Scheduler] New post found: {extract_caption(entry)[:80]}...")
+                print(f"[Scheduler] New post: {extract_caption(entry)[:80]}...")
                 send_post(entry)
-                mark_as_sent(entry.link)
                 new_count += 1
-                # Small delay between posts to avoid Telegram rate limits
                 time.sleep(2)
 
-        print(f"[Scheduler] Check complete. Posted {new_count} new item(s).")
+        print(f"[Scheduler] Check complete. Posted {new_count} item(s).")
     except Exception as e:
-        print(f"[Scheduler] Error in process_new_posts: {e}")
+        print(f"[Scheduler] Error: {e}")
         traceback.print_exc()
+
+
+def refill_null_fields():
+    """
+    Re-fetch the RSS feed and fill null/empty caption or image_url
+    for posts that still appear in the feed.
+    Returns (updated_count, skipped_count, message).
+    """
+    print("[Refill] Starting backfill of null caption/image_url...")
+    entries = fetch_feed()
+    if not entries:
+        return 0, 0, "Could not fetch RSS feed (empty or error)."
+
+    # Map cleaned link -> (caption, image_url) from live feed
+    feed_map = {}
+    for entry in entries:
+        if not entry.get("link"):
+            continue
+        clean = get_clean_link(entry.link)
+        img = None
+        if "media_content" in entry and entry.media_content:
+            img = entry.media_content[0].get("url")
+        feed_map[clean] = {
+            "caption": extract_caption(entry),
+            "image_url": img or "",
+        }
+
+    needs = get_rows_needing_refill()
+    if not needs:
+        return 0, 0, "No rows with empty caption or image_url."
+
+    updated = 0
+    skipped = 0
+
+    for row in needs:
+        clean = get_clean_link(row.get("link") or "")
+        if clean not in feed_map:
+            skipped += 1
+            continue
+
+        data = feed_map[clean]
+        new_caption = row.get("caption")
+        new_image = row.get("image_url")
+
+        # Only fill missing pieces
+        if not new_caption or not str(new_caption).strip():
+            new_caption = data["caption"]
+        if not new_image or not str(new_image).strip():
+            new_image = data["image_url"]
+
+        if update_post_fields(clean, caption=new_caption, image_url=new_image):
+            updated += 1
+            print(f"[Refill] Updated: {clean}")
+        else:
+            skipped += 1
+
+    msg = (
+        f"Refill done. Updated {updated} row(s). "
+        f"Skipped {skipped} (not in current RSS feed or update failed)."
+    )
+    print(f"[Refill] {msg}")
+    return updated, skipped, msg
 
 
 def run_scheduler():
     print("[Scheduler] Started. Checking every 5 minutes.")
-    # Run once immediately on startup
     process_new_posts()
-
     while True:
         try:
-            time.sleep(300)  # Check every 5 minutes
+            time.sleep(300)
             process_new_posts()
         except Exception as e:
-            print(f"[Scheduler] Unexpected error in loop: {e}")
+            print(f"[Scheduler] Unexpected error: {e}")
             traceback.print_exc()
-            # Keep the loop alive even after errors
             time.sleep(60)
 
 
@@ -214,22 +324,46 @@ def manual_send(message):
     bot.reply_to(message, "✅ Check complete.")
 
 
+@bot.message_handler(commands=["refill", "backfill"])
+def refill_command(message):
+    bot.reply_to(
+        message,
+        "🔄 Refilling empty caption/image_url from the live RSS feed…",
+    )
+    try:
+        updated, skipped, msg = refill_null_fields()
+        bot.reply_to(message, f"✅ {msg}")
+    except Exception as e:
+        traceback.print_exc()
+        bot.reply_to(message, f"❌ Refill failed: {e}")
+
+
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.reply_to(message, "🤖 Bot is running and connected to Supabase.")
+    bot.reply_to(
+        message,
+        "🤖 Bot is running.\n"
+        "Commands:\n"
+        "/snd — check for new posts\n"
+        "/refill — fill null caption/image_url from RSS\n"
+        "Open the Mini App from the menu button.",
+    )
 
 
 if __name__ == "__main__":
-    # Start Web Server (keep-alive / health check)
     threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080))),
+        target=lambda: app.run(
+            host="0.0.0.0",
+            port=int(os.environ.get("PORT", 8080)),
+            use_reloader=False,
+        ),
         daemon=True,
     ).start()
 
-    # Start Automation
-    scheduler_thread = threading.Thread(target=run_scheduler, daemon=False, name="scheduler")
+    scheduler_thread = threading.Thread(
+        target=run_scheduler, daemon=False, name="scheduler"
+    )
     scheduler_thread.start()
 
-    # Run Bot
     print("Bot is polling...")
     bot.infinity_polling(none_stop=True, skip_pending=True)

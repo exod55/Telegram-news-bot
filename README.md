@@ -1,71 +1,74 @@
-# Telegram News Bot (Instagram → Telegram)
+# Telegram News Bot + 3D Mini App
 
-Automatically reposts new Instagram posts from **@igndotcom** into a Telegram channel.
-
-The bot polls an RSS feed (via [RSS-Bridge](https://rss-bridge.org)), deduplicates posts with Supabase, cleans captions (removes “Link in bio” style phrases), and sends the image + caption to your channel every 5 minutes.
+Automatically reposts Instagram posts from **@igndotcom** into a Telegram channel, and serves a **Telegram Mini App** with a 3D glassmorphism feed.
 
 ## Features
 
-- Automatic checks every 5 minutes (plus an immediate check on startup)
-- Caption cleanup: strips “Link in bio”, “Read more in bio”, “Link in the comments”, etc.
-- Uses the fuller caption from the RSS description when available
-- Deduplication via Supabase (`posted_links` table)
-- Manual force-check with `/snd`
-- Simple Flask health endpoint (`/`) for keep-alive on PaaS hosts
-- Docker-ready
+- RSS polling every 5 minutes (plus check on startup)
+- Clean captions (strips “Link in bio”, “Read more in bio”, etc.)
+- Deduplication via Supabase
+- `/api/posts` JSON API for the Mini App
+- Single-page Mini App: Three.js background, glass cards, tilt effect, Telegram theme sync
+- Manual force-check: `/snd`
 
-## Requirements
+## Project layout
 
-- Python 3.11+
-- A Telegram bot token ([@BotFather](https://t.me/BotFather))
-- A Telegram channel (bot must be an admin)
-- A [Supabase](https://supabase.com) project with a table named `posted_links`
-
-### Supabase table
-
-Create a table `posted_links` with at least:
-
-| Column | Type    | Notes                          |
-|--------|---------|--------------------------------|
-| `link` | text    | Primary key / unique recommended |
-| `id`   | bigint  | Optional auto-increment PK     |
-
-Example SQL:
-
-```sql
-create table posted_links (
-  id bigint generated always as identity primary key,
-  link text unique not null,
-  created_at timestamptz default now()
-);
+```
+Telegram-news-bot-main/
+├── bot.py              # Bot + Flask API + scheduler
+├── static/
+│   └── index.html      # Mini App frontend
+├── schema.sql          # Supabase table updates
+├── requirements.txt
+├── Dockerfile
+└── README.md
 ```
 
-## Environment variables
+## 1. Database (Supabase)
 
-| Variable       | Description                          |
-|----------------|--------------------------------------|
-| `BOT_TOKEN`    | Telegram bot token                   |
-| `CHANNEL_ID`   | Target channel ID (e.g. `-100…`)     |
-| `SUPABASE_URL` | Supabase project URL                 |
-| `SUPABASE_KEY` | Supabase service or anon key         |
-| `PORT`         | Optional; Flask port (default 8080)  |
+Run in the Supabase SQL editor:
 
-## Local setup
+```sql
+ALTER TABLE public.posted_links
+  ADD COLUMN IF NOT EXISTS caption text,
+  ADD COLUMN IF NOT EXISTS image_url text;
+```
+
+Full reference table:
+
+| Column       | Type        | Notes                    |
+|--------------|-------------|--------------------------|
+| `id`         | bigint      | PK (auto)                |
+| `link`       | text        | Unique Instagram URL     |
+| `caption`    | text        | Cleaned caption          |
+| `image_url`  | text        | Media URL from RSS       |
+| `created_at` | timestamptz | Default `now()`          |
+
+## 2. Environment variables
+
+| Variable       | Description                    |
+|----------------|--------------------------------|
+| `BOT_TOKEN`    | Telegram bot token             |
+| `CHANNEL_ID`   | Channel ID (e.g. `-100…`)      |
+| `SUPABASE_URL` | Supabase project URL           |
+| `SUPABASE_KEY` | Supabase key                   |
+| `PORT`         | Optional (default `8080`)      |
+
+## 3. Local run
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/Telegram-news-bot.git
-cd Telegram-news-bot
 python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
+source venv/bin/activate
 pip install -r requirements.txt
-export BOT_TOKEN=...
-export CHANNEL_ID=...
-export SUPABASE_URL=...
-export SUPABASE_KEY=...
+export BOT_TOKEN=... CHANNEL_ID=... SUPABASE_URL=... SUPABASE_KEY=...
 python bot.py
 ```
 
-## Docker
+- Mini App UI: `http://localhost:8080/`
+- API: `http://localhost:8080/api/posts`
+- Health: `http://localhost:8080/health`
+
+## 4. Docker
 
 ```bash
 docker build -t telegram-news-bot .
@@ -78,18 +81,33 @@ docker run -d \
   telegram-news-bot
 ```
 
+## 5. Telegram Mini App setup
+
+1. Deploy the service over **HTTPS** (Render, Railway, Fly.io, etc.).
+2. In [@BotFather](https://t.me/BotFather):
+   - `/newapp` or **Bot Settings → Menu Button / Configure Mini App**
+   - Set the URL to your deployed root, e.g. `https://your-app.onrender.com/`
+3. Open the bot → Menu / Mini App button → feed loads from `/api/posts`.
+
 ## Bot commands
 
-| Command | Description                |
-|---------|----------------------------|
-| `/start`| Confirm the bot is running |
-| `/snd`  | Manually check for new posts |
+| Command    | Description |
+|------------|-------------|
+| `/start`   | Confirm bot is running + list commands |
+| `/snd`     | Manually check for new posts |
+| `/refill`  | Fill null/empty `caption` and `image_url` from the live RSS feed (alias: `/backfill`) |
 
-## How captions work
+### `/refill` notes
 
-1. Prefer the plain-text body from the RSS `description` / `summary` (fuller than the truncated `title`).
-2. Strip HTML and trailing “Link in bio / comments / read more…” phrases.
-3. Post as: `🎬 {cleaned caption}` + link to the Instagram post.
+- Only updates rows that still appear in the current Instagram RSS feed.
+- Older posts that dropped out of the feed cannot be refilled this way (Instagram does not expose them via RSS-Bridge).
+- Safe to run multiple times; it only writes missing fields.
+
+## Notes
+
+- New posts store `caption` + `image_url` in Supabase so the Mini App can render them.
+- Older rows without those columns will show without image/caption until new posts arrive (or you backfill).
+- Instagram media URLs may require a browser User-Agent; the bot already uses one when downloading for Telegram.
 
 ## License
 
