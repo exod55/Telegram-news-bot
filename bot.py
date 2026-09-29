@@ -142,21 +142,39 @@ def strip_html(text):
 
 
 def remove_bio_phrases(text):
+    """Strip Instagram CTA endings like 'Link in bio for more' anywhere in the text."""
     if not text:
         return text
+
+    # Remove common CTA sentences (end of string or mid-text)
     patterns = [
-        r"(?i)\s*link\s+in\s+(?:the\s+)?(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*read\s+more\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*full\s+(?:review|article|story)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*more\s+(?:info|details?|here)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*link\s+in\s+bio\.?\s*$",
-        r"(?i)\s*view\s+all\s+\d+\s+comments\.?\s*$",
+        # "Link in bio for more / for our full review / for more info."
+        r"(?i)\s*link\s+in\s+(?:the\s+)?(?:bio|comments?)\b[^.!\n]*[.!]?",
+        # "Read more in bio."
+        r"(?i)\s*read\s+more\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?",
+        # "Full review / article / story in bio."
+        r"(?i)\s*full\s+(?:review|article|story)\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?",
+        # "More info / details in bio."
+        r"(?i)\s*more\s+(?:info|details?|here)\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?",
+        # "Check / see the link in bio"
+        r"(?i)\s*(?:check|see|click)(?:\s+out)?\s+(?:the\s+)?link\s+in\s+bio\b[^.!\n]*[.!]?",
+        # "Link in bio" alone (after longer phrases)
+        r"(?i)\s*link\s+in\s+bio\b[.!]?",
+        # Orphaned CTA stems
+        r"(?i)\s*(?:check|see|click)(?:\s+out)?\s+the\s*$",
+        # "View all N comments" leftover from embed scrape
+        r"(?i)\s*view\s+all\s+\d+\s+comments\b[.!]?",
+        # Trailing ellipsis used before CTA
         r"\s*\.{2,}\s*$",
     ]
+
     cleaned = text
     for pat in patterns:
         cleaned = re.sub(pat, "", cleaned)
-    return cleaned.strip(" \t\n\r.-–—")
+
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned)
+    return cleaned.strip(" \t\n\r.-–—|")
 
 
 def extract_caption_from_rss_entry(entry):
