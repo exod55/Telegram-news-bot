@@ -511,6 +511,148 @@ def send_channel_post(caption_body, image_url, post_link):
     return getattr(msg, "message_id", None) if msg is not None else None
 
 
+
+def extract_instagram_link_from_text(text):
+    """Pull the first Instagram post/reel URL out of a Telegram caption/text."""
+    if not text:
+        return ""
+    m = re.search(
+        r"https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)/?",
+        text,
+        re.I,
+    )
+    if not m:
+        return ""
+    return get_clean_link(m.group(0))
+
+
+def edit_posts_by_message_range(start_id, end_id, probe_chat_id):
+    """
+    For each Telegram message id in [start_id, end_id] on CHANNEL_ID:
+      1) Forward the message to probe_chat_id to read its caption (Bot API has no getMessage)
+      2) Extract Instagram link from caption
+      3) Fetch full clean caption from Instagram
+      4) editMessageCaption / editMessageText on the original channel message
+      5) Update Supabase (caption + telegram_message_id)
+      6) Delete the temporary forward from probe_chat_id
+    """
+    if start_id > end_id:
+        start_id, end_id = end_id, start_id
+
+    total = end_id - start_id + 1
+    print(f"[EditRange] Scanning message ids {start_id}..{end_id} ({total} msgs)")
+
+    edited = 0
+    skipped = 0
+    errors = 0
+    no_link = 0
+    not_found = 0
+
+    for mid in range(start_id, end_id + 1):
+        fwd = None
+        try:
+            # Forward to the user so the API returns the Message (with caption)
+            try:
+                fwd = bot.forward_message(
+                    chat_id=probe_chat_id,
+                    from_chat_id=CHANNEL_ID,
+                    message_id=mid,
+                )
+            except Exception as e:
+                err = str(e).lower()
+                if "message to forward not found" in err or "message not found" in err:
+                    not_found += 1
+                    print(f"[EditRange] {mid}: not found")
+                else:
+                    errors += 1
+                    print(f"[EditRange] {mid}: forward failed: {e}")
+                time.sleep(0.4)
+                continue
+
+            raw_caption = (getattr(fwd, "caption", None) or getattr(fwd, "text", None) or "")
+            ig_link = extract_instagram_link_from_text(raw_caption)
+
+            # Clean up the probe forward
+            try:
+                bot.delete_message(probe_chat_id, fwd.message_id)
+            except Exception:
+                pass
+
+            if not ig_link:
+                no_link += 1
+                print(f"[EditRange] {mid}: no Instagram link in caption")
+                time.sleep(0.35)
+                continue
+
+            ig = fetch_info_from_instagram_link(ig_link)
+            new_caption = remove_bio_phrases(ig.get("caption") or "") or "New post"
+            new_image = ig.get("image_url") or media_url_from_link(ig_link) or ""
+            tg_caption = f"🎬 {new_caption}\n\n🔗 {get_clean_link(ig_link)}"[:1024]
+
+            edited_ok = False
+            try:
+                bot.edit_message_caption(
+                    chat_id=CHANNEL_ID,
+                    message_id=mid,
+                    caption=tg_caption,
+                )
+                edited_ok = True
+            except Exception:
+                try:
+                    bot.edit_message_text(
+                        tg_caption,
+                        chat_id=CHANNEL_ID,
+                        message_id=mid,
+                    )
+                    edited_ok = True
+                except Exception as e2:
+                    errors += 1
+                    print(f"[EditRange] {mid}: edit failed: {e2}")
+
+            if edited_ok:
+                edited += 1
+                update_post_fields(
+                    ig_link,
+                    caption=new_caption,
+                    image_url=new_image,
+                    telegram_message_id=mid,
+                )
+                # If row did not exist yet, insert it
+                if not is_link_sent(ig_link):
+                    save_post_to_supabase(
+                        ig_link,
+                        new_caption,
+                        new_image,
+                        telegram_message_id=mid,
+                    )
+                print(f"[EditRange] {mid}: edited ← {ig_link}")
+            else:
+                skipped += 1
+
+            time.sleep(1.0)  # stay under rate limits (~80 posts)
+
+        except Exception as e:
+            errors += 1
+            print(f"[EditRange] {mid}: unexpected: {e}")
+            if fwd is not None:
+                try:
+                    bot.delete_message(probe_chat_id, fwd.message_id)
+                except Exception:
+                    pass
+            time.sleep(0.5)
+
+    message = (
+        f"✅ Range edit finished ({start_id} → {end_id})\n"
+        f"• Telegram captions edited: {edited}\n"
+        f"• No Instagram link in caption: {no_link}\n"
+        f"• Message not found: {not_found}\n"
+        f"• Skipped/failed edit: {skipped}\n"
+        f"• Errors: {errors}"
+    )
+    print(message)
+    return {"ok": edited > 0 or (errors == 0 and not_found < total), "changed": edited, "message": message}
+
+
 def edit_posts_on_telegram(repost_if_missing=False):
     """
     For each stored Instagram link: fetch full caption (no link-in-bio),
@@ -669,14 +811,14 @@ HELP_TEXT = (
     "🤖 Bot commands\n\n"
     "/start — Confirm the bot is running\n"
     "/help — Show this help message\n"
-    "/snd — Manually check for new Instagram posts and send them to the channel\n"
-    "/refill — Fill empty caption/image_url using each row's Instagram link "
-    "(alias: /backfill)\n"
-    "/edit_post — Update captions from Instagram; edit Telegram if message id exists\n"
-    "/edit_post repost — Repost to channel when message id is missing (saves new ids)\n\n"
+    "/snd — Check for new Instagram posts\n"
+    "/refill — Fill empty caption/image_url from Instagram links\n"
+    "/edit_post — Edit posts that already have a saved message id\n"
+    "/edit_post repost — Repost when message id is missing\n"
+    "/edit_post range 1415 1492 — Scan channel message ids, match Instagram"
+    " links from captions, edit those posts in place\n\n"
     "📱 Open the Mini App from the menu button to browse the feed."
 )
-
 
 @bot.message_handler(commands=["help"])
 def help_command(message):
@@ -712,28 +854,78 @@ def refill_command(message):
 @bot.message_handler(commands=["edit_post"])
 def edit_post_command(message):
     parts = (message.text or "").split()
-    repost = any(p.lower() in ("repost", "resend", "force") for p in parts[1:])
+    args = parts[1:]
+
+    # /edit_post range 1415 1492
+    if len(args) >= 3 and args[0].lower() == "range":
+        try:
+            start_id = int(args[1])
+            end_id = int(args[2])
+        except ValueError:
+            bot.reply_to(message, "Usage: /edit_post range 1415 1492")
+            return
+
+        if abs(end_id - start_id) > 500:
+            bot.reply_to(message, "Range too large (max 500 messages).")
+            return
+
+        bot.reply_to(
+            message,
+            "Scanning channel messages {0} to {1}.\n"
+            "Matching Instagram links from captions and editing in place.\n"
+            "Brief forwards may appear here while reading; they are deleted.\n"
+            "This can take several minutes.".format(start_id, end_id),
+        )
+        try:
+            result = edit_posts_by_message_range(
+                start_id, end_id, probe_chat_id=message.chat.id
+            )
+            bot.reply_to(message, result["message"])
+        except Exception as e:
+            traceback.print_exc()
+            bot.reply_to(message, "Range edit failed:\n{}".format(e))
+        return
+
+    # /edit_post 1415 1492
+    if len(args) == 2 and args[0].isdigit() and args[1].isdigit():
+        start_id, end_id = int(args[0]), int(args[1])
+        bot.reply_to(
+            message,
+            "Scanning channel messages {0} to {1}. Please wait.".format(
+                start_id, end_id
+            ),
+        )
+        try:
+            result = edit_posts_by_message_range(
+                start_id, end_id, probe_chat_id=message.chat.id
+            )
+            bot.reply_to(message, result["message"])
+        except Exception as e:
+            traceback.print_exc()
+            bot.reply_to(message, "Range edit failed:\n{}".format(e))
+        return
+
+    repost = any(p.lower() in ("repost", "resend", "force") for p in args)
 
     if repost:
         bot.reply_to(
             message,
-            "✏️ Updating from Instagram links…\n"
-            "Posts without a message id will be REPOSTED to the channel "
-            "with full captions. This can take a few minutes.",
+            "Updating from Instagram links. Posts without a message id "
+            "will be REPOSTED to the channel.",
         )
     else:
         bot.reply_to(
             message,
-            "✏️ Updating captions from each Instagram link…\n"
-            "Edits Telegram posts when message ids are stored.\n"
-            "If all ids are missing, you will be told to run /edit_post repost.",
+            "Updating captions from Instagram links when message ids exist.\n"
+            "For channel history use:\n"
+            "/edit_post range 1415 1492",
         )
     try:
         result = edit_posts_on_telegram(repost_if_missing=repost)
         bot.reply_to(message, result["message"])
     except Exception as e:
         traceback.print_exc()
-        bot.reply_to(message, f"❌ /edit_post failed:\n{e}")
+        bot.reply_to(message, "/edit_post failed:\n{}".format(e))
 
 
 @bot.message_handler(commands=["start"])
