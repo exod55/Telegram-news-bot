@@ -100,10 +100,11 @@ docker run -d \
 
 ### `/refill` notes
 
-- Replies clearly whether it **worked** (updated N posts) or **did not** (nothing updated / feed error).
-- Only updates rows that still appear in the current Instagram RSS feed.
-- Older posts that dropped out of the feed cannot be refilled this way.
+- Replies clearly whether it **worked** (updated N posts) or **did not**.
+- **Step 1:** match posts still in the live RSS feed.
+- **Step 2:** for older posts still on Instagram but out of RSS, fetch the public embed page for caption and build a media URL for the image.
 - Safe to run multiple times; it only writes missing fields.
+- May take a minute if many rows need Instagram page fetches (rate-limit friendly delay).
 
 ### Mini App images
 

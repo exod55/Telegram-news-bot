@@ -24,23 +24,17 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__, static_folder="static", static_url_path="")
 
-# Allowed hosts for image proxy (prevent open proxy abuse)
 ALLOWED_IMAGE_HOSTS = {
     "www.instagram.com",
     "instagram.com",
-    "scontent.cdninstagram.com",
-    "scontent-iad3-1.cdninstagram.com",
-    "instagram.fcdninstagram.com",
 }
 
 
 def _host_allowed(url: str) -> bool:
     try:
-        host = urlparse(url).hostname or ""
-        host = host.lower()
+        host = (urlparse(url).hostname or "").lower()
         if host in ALLOWED_IMAGE_HOSTS:
             return True
-        # Allow any *.cdninstagram.com / *.instagram.com subdomain
         if host.endswith(".cdninstagram.com") or host.endswith(".instagram.com"):
             return True
         return False
@@ -50,13 +44,11 @@ def _host_allowed(url: str) -> bool:
 
 @app.route("/")
 def home():
-    """Serve the Mini App frontend."""
     return send_from_directory(app.static_folder, "index.html")
 
 
 @app.route("/api/posts")
 def get_posts():
-    """JSON feed for the Telegram Mini App."""
     try:
         response = (
             supabase.table("posted_links")
@@ -72,12 +64,7 @@ def get_posts():
 
 @app.route("/api/image")
 def proxy_image():
-    """
-    Proxy Instagram media so the Mini App can display images.
-    Instagram often blocks direct <img> hotlinking; this fetches with a
-    browser User-Agent and streams the bytes back.
-    Usage: /api/image?url=<encoded_image_url>
-    """
+    """Proxy Instagram media for the Mini App."""
     url = request.args.get("url", "").strip()
     if not url:
         return jsonify({"ok": False, "error": "missing url"}), 400
@@ -101,7 +88,6 @@ def proxy_image():
             return jsonify({"ok": False, "error": f"upstream {r.status_code}"}), 502
 
         content_type = r.headers.get("Content-Type", "image/jpeg")
-        # Avoid proxying HTML error pages as images
         if "text/html" in content_type:
             return jsonify({"ok": False, "error": "upstream returned html"}), 502
 
@@ -109,9 +95,7 @@ def proxy_image():
             r.iter_content(chunk_size=16 * 1024),
             status=200,
             content_type=content_type,
-            headers={
-                "Cache-Control": "public, max-age=3600",
-            },
+            headers={"Cache-Control": "public, max-age=3600"},
         )
     except Exception as e:
         print(f"[Proxy] Image error: {e}")
@@ -125,7 +109,6 @@ def health():
 
 # --- DATABASE FUNCTIONS ---
 def get_clean_link(link):
-    """Removes tracking junk and trailing slashes."""
     return link.split("?")[0].rstrip("/")
 
 
@@ -155,7 +138,6 @@ def mark_as_sent(link, caption="", image_url=""):
 
 
 def update_post_fields(link, caption=None, image_url=None):
-    """Update caption and/or image_url for an existing row."""
     clean_link = get_clean_link(link)
     payload = {}
     if caption is not None:
@@ -173,7 +155,6 @@ def update_post_fields(link, caption=None, image_url=None):
 
 
 def get_rows_needing_refill():
-    """Rows where caption or image_url is null or empty."""
     try:
         response = (
             supabase.table("posted_links")
@@ -217,6 +198,7 @@ def remove_bio_phrases(text):
         r"(?i)\s*full\s+(?:review|article|story)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
         r"(?i)\s*more\s+(?:info|details?|here)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
         r"(?i)\s*link\s+in\s+bio\.?\s*$",
+        r"(?i)\s*view\s+all\s+\d+\s+comments\.?\s*$",
         r"\s*\.{2,}\s*$",
     ]
 
@@ -242,11 +224,72 @@ def extract_caption(entry):
 
     caption = max(candidates, key=len) if candidates else ""
     caption = remove_bio_phrases(caption)
+    return caption or "New post"
 
-    if not caption:
-        caption = "New post"
 
-    return caption
+def instagram_shortcode(link: str):
+    """Extract shortcode from /p/CODE/ or /reel/CODE/ URLs."""
+    m = re.search(r"instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)", link or "")
+    return m.group(1) if m else None
+
+
+def media_url_from_link(link: str):
+    """Build a working Instagram media URL from a post link."""
+    code = instagram_shortcode(link)
+    if not code:
+        return ""
+    return f"https://www.instagram.com/p/{code}/media/?size=l"
+
+
+def fetch_instagram_post_meta(link: str):
+    """
+    Fetch caption (and confirm media) for posts no longer in the RSS feed
+    via Instagram's public embed page.
+    """
+    code = instagram_shortcode(link)
+    if not code:
+        return {"caption": "", "image_url": ""}
+
+    image_url = media_url_from_link(link)
+    caption = ""
+
+    embed_url = f"https://www.instagram.com/p/{code}/embed/captioned/"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 "
+            "Mobile/15E148 Safari/604.1"
+        ),
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.instagram.com/",
+    }
+
+    try:
+        r = requests.get(embed_url, headers=headers, timeout=20)
+        if r.status_code == 200 and r.text:
+            m = re.search(
+                r'class="Caption"[^>]*>(.*?)</div>\s*<div class="CaptionComments"',
+                r.text,
+                re.I | re.S,
+            )
+            if not m:
+                m = re.search(r'class="Caption"[^>]*>(.*?)</div>', r.text, re.I | re.S)
+            if m:
+                raw = m.group(1)
+                raw = re.sub(
+                    r'<a class="CaptionUsername"[^>]*>.*?</a>',
+                    "",
+                    raw,
+                    flags=re.I | re.S,
+                )
+                raw = re.sub(r"<br\s*/?>", "\n", raw, flags=re.I)
+                raw = re.sub(r"<[^>]+>", "", raw)
+                caption = remove_bio_phrases(html.unescape(raw).strip())
+    except Exception as e:
+        print(f"[Refill] Embed fetch failed for {code}: {e}")
+
+    return {"caption": caption, "image_url": image_url}
 
 
 # --- RSS & BOT LOGIC ---
@@ -270,6 +313,9 @@ def fetch_feed():
 
 def send_post(entry):
     image_url = entry.media_content[0]["url"] if "media_content" in entry else None
+    if not image_url and entry.get("link"):
+        image_url = media_url_from_link(entry.link)
+
     caption_body = extract_caption(entry)
     caption = f"🎬 {caption_body}\n\n🔗 {entry.link}"[:1024]
 
@@ -313,19 +359,13 @@ def process_new_posts():
 
 def refill_null_fields():
     """
-    Re-fetch the RSS feed and fill null/empty caption or image_url
-    for posts that still appear in the feed.
-    Returns dict with success flag and details.
+    Fill null/empty caption or image_url.
+    1) Match against live RSS feed
+    2) For the rest, fetch Instagram embed page + construct media URL
+       (works for posts still on Instagram but no longer in RSS)
     """
-    print("[Refill] Starting backfill of null caption/image_url...")
+    print("[Refill] Starting backfill...")
     entries = fetch_feed()
-    if not entries:
-        return {
-            "ok": False,
-            "updated": 0,
-            "skipped": 0,
-            "message": "❌ Refill failed: could not fetch the RSS feed (empty or network error).",
-        }
 
     feed_map = {}
     for entry in entries:
@@ -335,6 +375,8 @@ def refill_null_fields():
         img = None
         if "media_content" in entry and entry.media_content:
             img = entry.media_content[0].get("url")
+        if not img:
+            img = media_url_from_link(entry.link)
         feed_map[clean] = {
             "caption": extract_caption(entry),
             "image_url": img or "",
@@ -351,25 +393,58 @@ def refill_null_fields():
 
     updated = 0
     skipped = 0
+    from_rss = 0
+    from_ig = 0
 
     for row in needs:
         clean = get_clean_link(row.get("link") or "")
-        if clean not in feed_map:
+        if not clean:
             skipped += 1
             continue
 
-        data = feed_map[clean]
         new_caption = row.get("caption")
         new_image = row.get("image_url")
+        source = None
 
-        if not new_caption or not str(new_caption).strip():
-            new_caption = data["caption"]
-        if not new_image or not str(new_image).strip():
-            new_image = data["image_url"]
+        if clean in feed_map:
+            data = feed_map[clean]
+            if not new_caption or not str(new_caption).strip():
+                new_caption = data["caption"]
+            if not new_image or not str(new_image).strip():
+                new_image = data["image_url"]
+            source = "rss"
+        else:
+            # Still on Instagram, but not in the short RSS window
+            data = fetch_instagram_post_meta(clean)
+            if not new_caption or not str(new_caption).strip():
+                new_caption = data.get("caption") or new_caption
+            if not new_image or not str(new_image).strip():
+                new_image = data.get("image_url") or media_url_from_link(clean)
+            source = "instagram"
+            # Be polite to Instagram
+            time.sleep(1.2)
 
-        if update_post_fields(clean, caption=new_caption, image_url=new_image):
+        # Require at least one improvement
+        had_cap = bool(row.get("caption") and str(row.get("caption")).strip())
+        had_img = bool(row.get("image_url") and str(row.get("image_url")).strip())
+        got_cap = bool(new_caption and str(new_caption).strip())
+        got_img = bool(new_image and str(new_image).strip())
+
+        if (not had_cap and not got_cap) and (not had_img and not got_img):
+            skipped += 1
+            continue
+
+        if update_post_fields(
+            clean,
+            caption=new_caption if got_cap else None,
+            image_url=new_image if got_img else None,
+        ):
             updated += 1
-            print(f"[Refill] Updated: {clean}")
+            if source == "rss":
+                from_rss += 1
+            else:
+                from_ig += 1
+            print(f"[Refill] Updated ({source}): {clean}")
         else:
             skipped += 1
 
@@ -377,16 +452,18 @@ def refill_null_fields():
         message = (
             f"✅ Refill worked!\n"
             f"• Updated: {updated} post(s)\n"
-            f"• Skipped: {skipped} (not in current RSS feed or update failed)\n"
+            f"  – from RSS: {from_rss}\n"
+            f"  – from Instagram pages: {from_ig}\n"
+            f"• Skipped: {skipped}\n"
             f"Open the Mini App to see captions and pictures."
         )
         ok = True
     else:
         message = (
             f"❌ Refill did not update any rows.\n"
-            f"• Candidates with empty fields: {len(needs)}\n"
-            f"• Skipped (not in live RSS): {skipped}\n"
-            f"Older posts that left the feed cannot be refilled."
+            f"• Candidates: {len(needs)}\n"
+            f"• Skipped: {skipped}\n"
+            f"Instagram may be rate-limiting; try again in a few minutes."
         )
         ok = False
 
@@ -412,13 +489,12 @@ HELP_TEXT = (
     "/start — Confirm the bot is running\n"
     "/help — Show this help message\n"
     "/snd — Manually check for new Instagram posts and send them to the channel\n"
-    "/refill — Fill empty caption/image\\_url in Supabase from the live RSS feed "
+    "/refill — Fill empty caption/image\\_url from RSS + Instagram pages "
     "(alias: /backfill)\n\n"
     "📱 Open the *Mini App* from the menu button to browse the 3D glass feed."
 )
 
 
-# --- COMMANDS ---
 @bot.message_handler(commands=["help"])
 def help_command(message):
     bot.reply_to(message, HELP_TEXT, parse_mode="Markdown")
@@ -439,7 +515,8 @@ def manual_send(message):
 def refill_command(message):
     bot.reply_to(
         message,
-        "🔄 Refilling empty caption/image_url from the live RSS feed…",
+        "🔄 Refilling empty caption/image_url…\n"
+        "Using live RSS + Instagram pages for older posts. This can take a minute.",
     )
     try:
         result = refill_null_fields()
