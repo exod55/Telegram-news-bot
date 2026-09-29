@@ -682,6 +682,49 @@
       padding: 8px;
     }
 
+
+    /* Pagination */
+    .pager {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 8px 16px 28px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .pager button {
+      min-width: 40px;
+      height: 40px;
+      padding: 0 12px;
+      border-radius: 12px;
+      border: 1px solid var(--card-border);
+      background: var(--card);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    .pager button:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .pager button.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--accent-text);
+    }
+    .pager .page-info {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 500;
+      padding: 0 6px;
+    }
+
   </style>
 </head>
 <body>
@@ -724,6 +767,8 @@
 
   <main id="feed" class="feed" aria-live="polite"></main>
 
+  <nav class="pager" id="pager" aria-label="Pagination"></nav>
+
   <p class="footer-note">Powered by Telegram · Images proxied for reliable mobile viewing</p>
 
   
@@ -752,6 +797,10 @@
     let allPosts = [];
     let activeFilter = "all";
     let query = "";
+    let currentPage = 1;
+    const PER_PAGE = 20;
+    let totalPages = 1;
+    let totalPosts = 0;
 
     const FILTER_KEYWORDS = {
       games: ["game", "gaming", "playstation", "xbox", "nintendo", "fortnite", "steam", "rpg", "fps", "console", "esports"],
@@ -888,7 +937,9 @@
       );
 
       document.getElementById("stats").textContent =
-        filtered.length + " stor" + (filtered.length === 1 ? "y" : "ies");
+        totalPosts
+          ? `Page ${currentPage}/${totalPages} · ${filtered.length} shown`
+          : filtered.length + " stor" + (filtered.length === 1 ? "y" : "ies");
 
       if (!filtered.length) {
         feed.innerHTML = `
@@ -1082,22 +1133,32 @@
     });
 
 
-    async function fetchPosts() {
+    async function fetchPosts(page) {
+      if (page == null) page = currentPage;
+      currentPage = Math.max(1, page);
+
       const fab = document.getElementById("fab-refresh");
       const btn = document.getElementById("btn-refresh");
-      fab.classList.add("spinning");
-      btn.style.opacity = "0.5";
+      if (fab) fab.classList.add("spinning");
+      if (btn) btn.style.opacity = "0.5";
       showSkeletons();
 
       try {
-        const res = await fetch(API_URL);
+        const url = API_URL + "?page=" + currentPage + "&per_page=" + PER_PAGE;
+        const res = await fetch(url);
         const data = await res.json();
         if (!data.ok) throw new Error(data.error || "API error");
+
         allPosts = (data.posts || []).map((p) => ({
           ...p,
           caption: typeof cleanCaption === "function" ? cleanCaption(p.caption) : p.caption,
         }));
+        totalPosts = data.total != null ? data.total : allPosts.length;
+        totalPages = data.pages != null ? data.pages : Math.max(1, Math.ceil(totalPosts / PER_PAGE));
+        currentPage = data.page != null ? data.page : currentPage;
+
         render();
+        renderPager();
       } catch (err) {
         console.error(err);
         document.getElementById("feed").innerHTML = `
@@ -1106,13 +1167,63 @@
             <h3>Couldn't load the feed</h3>
             <p>Check your connection and tap refresh.</p>
           </div>`;
+        const pg = document.getElementById("pager");
+        if (pg) pg.innerHTML = "";
       } finally {
-        fab.classList.remove("spinning");
-        btn.style.opacity = "1";
+        if (fab) fab.classList.remove("spinning");
+        if (btn) btn.style.opacity = "1";
       }
     }
 
-    // Search
+    function renderPager() {
+      const pg = document.getElementById("pager");
+      if (!pg) return;
+      if (totalPages <= 1 && totalPosts <= PER_PAGE) {
+        pg.innerHTML = totalPosts
+          ? `<span class="page-info">${totalPosts} stor${totalPosts === 1 ? "y" : "ies"}</span>`
+          : "";
+        return;
+      }
+
+      let html = "";
+      html += `<button type="button" data-go="prev" ${currentPage <= 1 ? "disabled" : ""}>‹ Prev</button>`;
+
+      const windowSize = 5;
+      let from = Math.max(1, currentPage - Math.floor(windowSize / 2));
+      let to = Math.min(totalPages, from + windowSize - 1);
+      from = Math.max(1, to - windowSize + 1);
+
+      if (from > 1) {
+        html += `<button type="button" data-go="1">1</button>`;
+        if (from > 2) html += `<span class="page-info">…</span>`;
+      }
+      for (let i = from; i <= to; i++) {
+        html += `<button type="button" data-go="${i}" class="${i === currentPage ? "active" : ""}">${i}</button>`;
+      }
+      if (to < totalPages) {
+        if (to < totalPages - 1) html += `<span class="page-info">…</span>`;
+        html += `<button type="button" data-go="${totalPages}">${totalPages}</button>`;
+      }
+
+      html += `<button type="button" data-go="next" ${currentPage >= totalPages ? "disabled" : ""}>Next ›</button>`;
+      html += `<span class="page-info">Page ${currentPage} / ${totalPages} · ${totalPosts} total</span>`;
+      pg.innerHTML = html;
+    }
+
+    document.getElementById("pager")?.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-go]");
+      if (!btn || btn.disabled) return;
+      const go = btn.getAttribute("data-go");
+      let page = currentPage;
+      if (go === "prev") page = currentPage - 1;
+      else if (go === "next") page = currentPage + 1;
+      else page = parseInt(go, 10);
+      if (page >= 1 && page <= totalPages && page !== currentPage) {
+        fetchPosts(page);
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+    });
+
     const searchInput = document.getElementById("search");
     let searchTimer;
     searchInput.addEventListener("input", () => {
@@ -1133,10 +1244,10 @@
       render();
     });
 
-    document.getElementById("btn-refresh").addEventListener("click", fetchPosts);
-    document.getElementById("fab-refresh").addEventListener("click", fetchPosts);
+    document.getElementById("btn-refresh").addEventListener("click", () => fetchPosts(currentPage));
+    document.getElementById("fab-refresh").addEventListener("click", () => fetchPosts(currentPage));
 
-    fetchPosts();
+    fetchPosts(1);
   </script>
 </body>
 </html>

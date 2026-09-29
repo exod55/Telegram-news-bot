@@ -58,15 +58,82 @@ def home():
 
 @app.route("/api/posts")
 def get_posts():
+    """
+    Mini App feed API.
+    Query params:
+      - page (default 1)
+      - per_page (default 20, max 100) — when set, returns one page
+      - limit — if provided without paging intent, fetch up to this many
+        (default 1000 = Supabase practical max per request; max 1000)
+      - all=1 — try to return as many as possible (up to 1000)
+    """
     try:
+        page = request.args.get("page")
+        per_page = request.args.get("per_page")
+        want_all = request.args.get("all") in ("1", "true", "yes")
+
+        # Paged mode (preferred for Mini App)
+        if page is not None or per_page is not None:
+            try:
+                page_n = max(1, int(page or 1))
+            except ValueError:
+                page_n = 1
+            try:
+                per_n = int(per_page or 20)
+            except ValueError:
+                per_n = 20
+            per_n = max(1, min(per_n, 100))
+
+            start = (page_n - 1) * per_n
+            end = start + per_n - 1
+
+            response = (
+                supabase.table("posted_links")
+                .select("id, link, caption, image_url, created_at", count="exact")
+                .order("created_at", desc=True)
+                .range(start, end)
+                .execute()
+            )
+            total = response.count if response.count is not None else len(response.data or [])
+            pages = max(1, (total + per_n - 1) // per_n) if total else 1
+            return jsonify(
+                {
+                    "ok": True,
+                    "posts": response.data or [],
+                    "count": len(response.data or []),
+                    "total": total,
+                    "page": page_n,
+                    "per_page": per_n,
+                    "pages": pages,
+                }
+            )
+
+        # Bulk mode (max / "unlimited" within Supabase single-request limit)
+        try:
+            limit = int(request.args.get("limit", 1000))
+        except ValueError:
+            limit = 1000
+        if want_all:
+            limit = 1000
+        limit = max(1, min(limit, 1000))
+
         response = (
             supabase.table("posted_links")
-            .select("id, link, caption, image_url, created_at")
+            .select("id, link, caption, image_url, created_at", count="exact")
             .order("created_at", desc=True)
-            .limit(25)
+            .limit(limit)
             .execute()
         )
-        return jsonify({"ok": True, "posts": response.data})
+        total = response.count if response.count is not None else len(response.data or [])
+        return jsonify(
+            {
+                "ok": True,
+                "posts": response.data or [],
+                "count": len(response.data or []),
+                "total": total,
+                "limit": limit,
+            }
+        )
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -526,53 +593,78 @@ def extract_instagram_link_from_text(text):
     return get_clean_link(m.group(0))
 
 
-def edit_posts_by_message_range(start_id, end_id, probe_chat_id):
+def edit_posts_by_message_range(start_id, end_id, probe_chat_id, stop_after_misses=8):
     """
-    For each Telegram message id in [start_id, end_id] on CHANNEL_ID:
-      1) Forward the message to probe_chat_id to read its caption (Bot API has no getMessage)
-      2) Extract Instagram link from caption
-      3) Fetch full clean caption from Instagram
-      4) editMessageCaption / editMessageText on the original channel message
-      5) Update Supabase (caption + telegram_message_id)
-      6) Delete the temporary forward from probe_chat_id
+    For each Telegram message id from start_id to end_id (inclusive) on CHANNEL_ID:
+      1) Forward to probe_chat_id to read caption
+      2) Extract Instagram link
+      3) Fetch clean caption from Instagram
+      4) Edit the original channel message
+      5) Update Supabase
+      6) Delete the temporary forward
+
+    If end_id is None, keep going upward from start_id until stop_after_misses
+    consecutive "message not found" results (reached past the latest post).
     """
-    if start_id > end_id:
+    open_ended = end_id is None
+    if not open_ended and start_id > end_id:
         start_id, end_id = end_id, start_id
 
-    total = end_id - start_id + 1
-    print(f"[EditRange] Scanning message ids {start_id}..{end_id} ({total} msgs)")
+    if open_ended:
+        print(f"[EditRange] From {start_id} until end of channel (stop after {stop_after_misses} misses)")
+    else:
+        total = end_id - start_id + 1
+        print(f"[EditRange] Scanning message ids {start_id}..{end_id} ({total} msgs)")
 
     edited = 0
     skipped = 0
     errors = 0
     no_link = 0
     not_found = 0
+    consecutive_misses = 0
+    last_id_tried = start_id - 1
+    mid = start_id
+    hard_cap = start_id + (2000 if open_ended else (end_id - start_id + 1))
 
-    for mid in range(start_id, end_id + 1):
+    while mid < hard_cap:
+        if not open_ended and mid > end_id:
+            break
+
+        last_id_tried = mid
         fwd = None
         try:
-            # Forward to the user so the API returns the Message (with caption)
             try:
                 fwd = bot.forward_message(
                     chat_id=probe_chat_id,
                     from_chat_id=CHANNEL_ID,
                     message_id=mid,
                 )
+                consecutive_misses = 0
             except Exception as e:
                 err = str(e).lower()
                 if "message to forward not found" in err or "message not found" in err:
                     not_found += 1
-                    print(f"[EditRange] {mid}: not found")
+                    consecutive_misses += 1
+                    print(f"[EditRange] {mid}: not found (miss streak {consecutive_misses})")
+                    if open_ended and consecutive_misses >= stop_after_misses:
+                        print(f"[EditRange] Stopping — {stop_after_misses} consecutive misses after {mid}")
+                        break
+                    mid += 1
+                    time.sleep(0.35)
+                    continue
                 else:
                     errors += 1
+                    consecutive_misses = 0
                     print(f"[EditRange] {mid}: forward failed: {e}")
-                time.sleep(0.4)
-                continue
+                    mid += 1
+                    time.sleep(0.4)
+                    continue
 
-            raw_caption = (getattr(fwd, "caption", None) or getattr(fwd, "text", None) or "")
+            raw_caption = (
+                getattr(fwd, "caption", None) or getattr(fwd, "text", None) or ""
+            )
             ig_link = extract_instagram_link_from_text(raw_caption)
 
-            # Clean up the probe forward
             try:
                 bot.delete_message(probe_chat_id, fwd.message_id)
             except Exception:
@@ -581,6 +673,7 @@ def edit_posts_by_message_range(start_id, end_id, probe_chat_id):
             if not ig_link:
                 no_link += 1
                 print(f"[EditRange] {mid}: no Instagram link in caption")
+                mid += 1
                 time.sleep(0.35)
                 continue
 
@@ -617,7 +710,6 @@ def edit_posts_by_message_range(start_id, end_id, probe_chat_id):
                     image_url=new_image,
                     telegram_message_id=mid,
                 )
-                # If row did not exist yet, insert it
                 if not is_link_sent(ig_link):
                     save_post_to_supabase(
                         ig_link,
@@ -629,7 +721,8 @@ def edit_posts_by_message_range(start_id, end_id, probe_chat_id):
             else:
                 skipped += 1
 
-            time.sleep(1.0)  # stay under rate limits (~80 posts)
+            mid += 1
+            time.sleep(1.0)
 
         except Exception as e:
             errors += 1
@@ -639,10 +732,12 @@ def edit_posts_by_message_range(start_id, end_id, probe_chat_id):
                     bot.delete_message(probe_chat_id, fwd.message_id)
                 except Exception:
                     pass
+            mid += 1
             time.sleep(0.5)
 
+    range_label = f"{start_id} → {last_id_tried}" + (" (until end)" if open_ended else "")
     message = (
-        f"✅ Range edit finished ({start_id} → {end_id})\n"
+        f"✅ Range edit finished ({range_label})\n"
         f"• Telegram captions edited: {edited}\n"
         f"• No Instagram link in caption: {no_link}\n"
         f"• Message not found: {not_found}\n"
@@ -650,7 +745,11 @@ def edit_posts_by_message_range(start_id, end_id, probe_chat_id):
         f"• Errors: {errors}"
     )
     print(message)
-    return {"ok": edited > 0 or (errors == 0 and not_found < total), "changed": edited, "message": message}
+    return {
+        "ok": edited > 0 or errors == 0,
+        "changed": edited,
+        "message": message,
+    }
 
 
 def edit_posts_on_telegram(repost_if_missing=False):
@@ -815,8 +914,8 @@ HELP_TEXT = (
     "/refill — Fill empty caption/image_url from Instagram links\n"
     "/edit_post — Edit posts that already have a saved message id\n"
     "/edit_post repost — Repost when message id is missing\n"
-    "/edit_post range 1415 1492 — Scan channel message ids, match Instagram"
-    " links from captions, edit those posts in place\n\n"
+    "/edit_post range 1415 — From that post until the end of the channel\n"
+    "/edit_post range 1415 1492 — Specific start and end message ids\n\n"
     "📱 Open the Mini App from the menu button to browse the feed."
 )
 
@@ -857,24 +956,41 @@ def edit_post_command(message):
     args = parts[1:]
 
     # /edit_post range 1415 1492
-    if len(args) >= 3 and args[0].lower() == "range":
+    # /edit_post range 1415          (from 1415 until end of channel)
+    if len(args) >= 1 and args[0].lower() == "range":
+        if len(args) < 2:
+            bot.reply_to(
+                message,
+                "Usage:\n"
+                "/edit_post range 1415 1492\n"
+                "/edit_post range 1415   (from 1415 until the latest posts)",
+            )
+            return
         try:
             start_id = int(args[1])
-            end_id = int(args[2])
+            end_id = int(args[2]) if len(args) >= 3 else None
         except ValueError:
             bot.reply_to(message, "Usage: /edit_post range 1415 1492")
             return
 
-        if abs(end_id - start_id) > 500:
+        if end_id is not None and abs(end_id - start_id) > 500:
             bot.reply_to(message, "Range too large (max 500 messages).")
             return
 
+        if end_id is None:
+            note = (
+                "Scanning from {0} until the end of the channel "
+                "(stops after several missing ids)."
+            ).format(start_id)
+        else:
+            note = "Scanning channel messages {0} to {1}.".format(start_id, end_id)
+
         bot.reply_to(
             message,
-            "Scanning channel messages {0} to {1}.\n"
-            "Matching Instagram links from captions and editing in place.\n"
-            "Brief forwards may appear here while reading; they are deleted.\n"
-            "This can take several minutes.".format(start_id, end_id),
+            note
+            + "\nMatching Instagram links and editing in place.\n"
+            "Brief forwards may appear here; they are deleted.\n"
+            "This can take several minutes.",
         )
         try:
             result = edit_posts_by_message_range(
@@ -886,7 +1002,25 @@ def edit_post_command(message):
             bot.reply_to(message, "Range edit failed:\n{}".format(e))
         return
 
-    # /edit_post 1415 1492
+    # /edit_post 1415 1492  or  /edit_post 1415
+    if len(args) == 1 and args[0].isdigit():
+        start_id = int(args[0])
+        bot.reply_to(
+            message,
+            "Scanning from {0} until the end of the channel. Please wait.".format(
+                start_id
+            ),
+        )
+        try:
+            result = edit_posts_by_message_range(
+                start_id, None, probe_chat_id=message.chat.id
+            )
+            bot.reply_to(message, result["message"])
+        except Exception as e:
+            traceback.print_exc()
+            bot.reply_to(message, "Range edit failed:\n{}".format(e))
+        return
+
     if len(args) == 2 and args[0].isdigit() and args[1].isdigit():
         start_id, end_id = int(args[0]), int(args[1])
         bot.reply_to(
@@ -916,8 +1050,9 @@ def edit_post_command(message):
     else:
         bot.reply_to(
             message,
-            "Updating captions from Instagram links when message ids exist.\n"
-            "For channel history use:\n"
+            "Updating captions when message ids exist.\n"
+            "Or scan channel history:\n"
+            "/edit_post range 1415\n"
             "/edit_post range 1415 1492",
         )
     try:
