@@ -241,7 +241,7 @@
           card.className = 'post-card';
 
           const img = post.image_url
-            ? `<img class="post-image" src="${escapeHtml(post.image_url)}" alt="Post media" loading="lazy" onerror="this.style.display='none'" />`
+            ? `<img class="post-image" src="/api/image?url=${encodeURIComponent(post.image_url)}" alt="Post media" loading="lazy" onerror="this.style.display='none'" />`
             : '';
 
           card.innerHTML = `

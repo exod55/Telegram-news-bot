@@ -4,10 +4,12 @@ import threading
 import time
 import traceback
 import html
+from urllib.parse import urlparse
+
 import feedparser
 import telebot
 import requests
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, send_from_directory, request, Response
 from supabase import create_client
 
 # --- CONFIGURATION ---
@@ -21,6 +23,29 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__, static_folder="static", static_url_path="")
+
+# Allowed hosts for image proxy (prevent open proxy abuse)
+ALLOWED_IMAGE_HOSTS = {
+    "www.instagram.com",
+    "instagram.com",
+    "scontent.cdninstagram.com",
+    "scontent-iad3-1.cdninstagram.com",
+    "instagram.fcdninstagram.com",
+}
+
+
+def _host_allowed(url: str) -> bool:
+    try:
+        host = urlparse(url).hostname or ""
+        host = host.lower()
+        if host in ALLOWED_IMAGE_HOSTS:
+            return True
+        # Allow any *.cdninstagram.com / *.instagram.com subdomain
+        if host.endswith(".cdninstagram.com") or host.endswith(".instagram.com"):
+            return True
+        return False
+    except Exception:
+        return False
 
 
 @app.route("/")
@@ -43,6 +68,54 @@ def get_posts():
         return jsonify({"ok": True, "posts": response.data})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/image")
+def proxy_image():
+    """
+    Proxy Instagram media so the Mini App can display images.
+    Instagram often blocks direct <img> hotlinking; this fetches with a
+    browser User-Agent and streams the bytes back.
+    Usage: /api/image?url=<encoded_image_url>
+    """
+    url = request.args.get("url", "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "missing url"}), 400
+    if not url.startswith("https://"):
+        return jsonify({"ok": False, "error": "only https urls allowed"}), 400
+    if not _host_allowed(url):
+        return jsonify({"ok": False, "error": "host not allowed"}), 403
+
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Referer": "https://www.instagram.com/",
+        }
+        r = requests.get(url, headers=headers, timeout=20, stream=True)
+        if r.status_code != 200:
+            return jsonify({"ok": False, "error": f"upstream {r.status_code}"}), 502
+
+        content_type = r.headers.get("Content-Type", "image/jpeg")
+        # Avoid proxying HTML error pages as images
+        if "text/html" in content_type:
+            return jsonify({"ok": False, "error": "upstream returned html"}), 502
+
+        return Response(
+            r.iter_content(chunk_size=16 * 1024),
+            status=200,
+            content_type=content_type,
+            headers={
+                "Cache-Control": "public, max-age=3600",
+            },
+        )
+    except Exception as e:
+        print(f"[Proxy] Image error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 502
 
 
 @app.route("/health")
@@ -100,10 +173,7 @@ def update_post_fields(link, caption=None, image_url=None):
 
 
 def get_rows_needing_refill():
-    """
-    Rows where caption or image_url is null or empty.
-    Fetches in pages to stay within API limits.
-    """
+    """Rows where caption or image_url is null or empty."""
     try:
         response = (
             supabase.table("posted_links")
@@ -245,14 +315,18 @@ def refill_null_fields():
     """
     Re-fetch the RSS feed and fill null/empty caption or image_url
     for posts that still appear in the feed.
-    Returns (updated_count, skipped_count, message).
+    Returns dict with success flag and details.
     """
     print("[Refill] Starting backfill of null caption/image_url...")
     entries = fetch_feed()
     if not entries:
-        return 0, 0, "Could not fetch RSS feed (empty or error)."
+        return {
+            "ok": False,
+            "updated": 0,
+            "skipped": 0,
+            "message": "❌ Refill failed: could not fetch the RSS feed (empty or network error).",
+        }
 
-    # Map cleaned link -> (caption, image_url) from live feed
     feed_map = {}
     for entry in entries:
         if not entry.get("link"):
@@ -268,7 +342,12 @@ def refill_null_fields():
 
     needs = get_rows_needing_refill()
     if not needs:
-        return 0, 0, "No rows with empty caption or image_url."
+        return {
+            "ok": True,
+            "updated": 0,
+            "skipped": 0,
+            "message": "✅ Nothing to refill — every recent row already has caption and image_url.",
+        }
 
     updated = 0
     skipped = 0
@@ -283,7 +362,6 @@ def refill_null_fields():
         new_caption = row.get("caption")
         new_image = row.get("image_url")
 
-        # Only fill missing pieces
         if not new_caption or not str(new_caption).strip():
             new_caption = data["caption"]
         if not new_image or not str(new_image).strip():
@@ -295,12 +373,25 @@ def refill_null_fields():
         else:
             skipped += 1
 
-    msg = (
-        f"Refill done. Updated {updated} row(s). "
-        f"Skipped {skipped} (not in current RSS feed or update failed)."
-    )
-    print(f"[Refill] {msg}")
-    return updated, skipped, msg
+    if updated > 0:
+        message = (
+            f"✅ Refill worked!\n"
+            f"• Updated: {updated} post(s)\n"
+            f"• Skipped: {skipped} (not in current RSS feed or update failed)\n"
+            f"Open the Mini App to see captions and pictures."
+        )
+        ok = True
+    else:
+        message = (
+            f"❌ Refill did not update any rows.\n"
+            f"• Candidates with empty fields: {len(needs)}\n"
+            f"• Skipped (not in live RSS): {skipped}\n"
+            f"Older posts that left the feed cannot be refilled."
+        )
+        ok = False
+
+    print(f"[Refill] {message}")
+    return {"ok": ok, "updated": updated, "skipped": skipped, "message": message}
 
 
 def run_scheduler():
@@ -316,12 +407,32 @@ def run_scheduler():
             time.sleep(60)
 
 
+HELP_TEXT = (
+    "🤖 *Bot commands*\n\n"
+    "/start — Confirm the bot is running\n"
+    "/help — Show this help message\n"
+    "/snd — Manually check for new Instagram posts and send them to the channel\n"
+    "/refill — Fill empty caption/image\\_url in Supabase from the live RSS feed "
+    "(alias: /backfill)\n\n"
+    "📱 Open the *Mini App* from the menu button to browse the 3D glass feed."
+)
+
+
 # --- COMMANDS ---
+@bot.message_handler(commands=["help"])
+def help_command(message):
+    bot.reply_to(message, HELP_TEXT, parse_mode="Markdown")
+
+
 @bot.message_handler(commands=["snd"])
 def manual_send(message):
     bot.reply_to(message, "🔍 Checking for new posts...")
-    process_new_posts()
-    bot.reply_to(message, "✅ Check complete.")
+    try:
+        process_new_posts()
+        bot.reply_to(message, "✅ Check complete.")
+    except Exception as e:
+        traceback.print_exc()
+        bot.reply_to(message, f"❌ Check failed: {e}")
 
 
 @bot.message_handler(commands=["refill", "backfill"])
@@ -331,22 +442,20 @@ def refill_command(message):
         "🔄 Refilling empty caption/image_url from the live RSS feed…",
     )
     try:
-        updated, skipped, msg = refill_null_fields()
-        bot.reply_to(message, f"✅ {msg}")
+        result = refill_null_fields()
+        bot.reply_to(message, result["message"])
     except Exception as e:
         traceback.print_exc()
-        bot.reply_to(message, f"❌ Refill failed: {e}")
+        bot.reply_to(message, f"❌ Refill failed with an error:\n{e}")
 
 
 @bot.message_handler(commands=["start"])
 def start(message):
     bot.reply_to(
         message,
-        "🤖 Bot is running.\n"
-        "Commands:\n"
-        "/snd — check for new posts\n"
-        "/refill — fill null caption/image_url from RSS\n"
-        "Open the Mini App from the menu button.",
+        "🤖 Bot is running and connected to Supabase.\n\n"
+        "Type /help to see all commands.\n"
+        "Open the Mini App from the menu button for the 3D feed.",
     )
 
 

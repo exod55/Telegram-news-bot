@@ -93,15 +93,21 @@ docker run -d \
 
 | Command    | Description |
 |------------|-------------|
-| `/start`   | Confirm bot is running + list commands |
+| `/start`   | Confirm the bot is running |
+| `/help`    | List all commands and descriptions |
 | `/snd`     | Manually check for new posts |
 | `/refill`  | Fill null/empty `caption` and `image_url` from the live RSS feed (alias: `/backfill`) |
 
 ### `/refill` notes
 
+- Replies clearly whether it **worked** (updated N posts) or **did not** (nothing updated / feed error).
 - Only updates rows that still appear in the current Instagram RSS feed.
-- Older posts that dropped out of the feed cannot be refilled this way (Instagram does not expose them via RSS-Bridge).
+- Older posts that dropped out of the feed cannot be refilled this way.
 - Safe to run multiple times; it only writes missing fields.
+
+### Mini App images
+
+Instagram media URLs often block direct hotlinking. The backend exposes `/api/image?url=...` which proxies allowed Instagram hosts so pictures show in the Mini App.
 
 ## Notes
 
