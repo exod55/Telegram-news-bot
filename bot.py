@@ -142,21 +142,26 @@ def strip_html(text):
 
 
 def remove_bio_phrases(text):
+    """Strip Instagram CTA phrases like 'Link in bio for more' anywhere in the text."""
     if not text:
         return text
     patterns = [
-        r"(?i)\s*link\s+in\s+(?:the\s+)?(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*read\s+more\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*full\s+(?:review|article|story)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*more\s+(?:info|details?|here)\s+in\s+(?:bio|comments?)\b[^.]*\.?\s*$",
-        r"(?i)\s*link\s+in\s+bio\.?\s*$",
-        r"(?i)\s*view\s+all\s+\d+\s+comments\.?\s*$",
+        r"(?i)\s*link\s+in\s+(?:the\s+)?(?:bio|comments?)\b[^.!\n]*[.!]?",
+        r"(?i)\s*read\s+more\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?",
+        r"(?i)\s*full\s+(?:review|article|story)\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?",
+        r"(?i)\s*more\s+(?:info|details?|here)\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?",
+        r"(?i)\s*(?:check|see|click)(?:\s+out)?\s+(?:the\s+)?link\s+in\s+bio\b[^.!\n]*[.!]?",
+        r"(?i)\s*link\s+in\s+bio\b[.!]?",
+        r"(?i)\s*(?:check|see|click)(?:\s+out)?\s+the\s*$",
+        r"(?i)\s*view\s+all\s+\d+\s+comments\b[.!]?",
         r"\s*\.{2,}\s*$",
     ]
     cleaned = text
     for pat in patterns:
         cleaned = re.sub(pat, "", cleaned)
-    return cleaned.strip(" \t\n\r.-–—")
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned)
+    return cleaned.strip(" \t\n\r.-–—|")
 
 
 def extract_caption_from_rss_entry(entry):
@@ -240,32 +245,34 @@ def is_link_sent(link):
     return len(response.data) > 0
 
 
-def save_post_to_supabase(link, caption="", image_url=""):
-    """Insert a full row using Instagram-derived fields."""
+def save_post_to_supabase(link, caption="", image_url="", telegram_message_id=None):
+    """Insert a full row using Instagram-derived fields (+ optional Telegram message id)."""
     clean_link = get_clean_link(link)
-    # Always prefer Instagram-derived image URL when we have a post link
     if not image_url:
         image_url = media_url_from_link(clean_link)
+    row = {
+        "link": clean_link,
+        "caption": caption or "New post",
+        "image_url": image_url or "",
+    }
+    if telegram_message_id is not None:
+        row["telegram_message_id"] = int(telegram_message_id)
     try:
-        supabase.table("posted_links").insert(
-            {
-                "link": clean_link,
-                "caption": caption or "New post",
-                "image_url": image_url or "",
-            }
-        ).execute()
-        print(f"[DB] Saved {clean_link}")
+        supabase.table("posted_links").insert(row).execute()
+        print(f"[DB] Saved {clean_link} (msg_id={telegram_message_id})")
     except Exception as e:
         print(f"[DB] Insert error (likely duplicate): {e}")
 
 
-def update_post_fields(link, caption=None, image_url=None):
+def update_post_fields(link, caption=None, image_url=None, telegram_message_id=None):
     clean_link = get_clean_link(link)
     payload = {}
     if caption is not None:
         payload["caption"] = caption
     if image_url is not None:
         payload["image_url"] = image_url
+    if telegram_message_id is not None:
+        payload["telegram_message_id"] = int(telegram_message_id)
     if not payload:
         return False
     try:
@@ -326,26 +333,27 @@ def send_post(entry):
     if not post_link:
         return
 
-    # Primary source of truth: Instagram URL
     ig = fetch_info_from_instagram_link(post_link)
 
-    # Fallback caption from RSS if embed returned nothing useful
     if not ig["caption"] or ig["caption"] == "New post":
         rss_cap = extract_caption_from_rss_entry(entry)
         if rss_cap:
             ig["caption"] = rss_cap
 
+    # Always strip bio CTAs from final caption
+    ig["caption"] = remove_bio_phrases(ig["caption"] or "") or "New post"
+
     if not ig["image_url"]:
-        # RSS media as last resort
         if "media_content" in entry and entry.media_content:
             ig["image_url"] = entry.media_content[0].get("url") or ""
         if not ig["image_url"]:
             ig["image_url"] = media_url_from_link(post_link)
 
-    caption_body = ig["caption"]
+    caption_body = remove_bio_phrases(ig["caption"]) or "New post"
     image_url = ig["image_url"]
     tg_caption = f"🎬 {caption_body}\n\n🔗 {get_clean_link(post_link)}"[:1024]
 
+    msg = None
     if image_url:
         try:
             headers = {
@@ -356,19 +364,19 @@ def send_post(entry):
             if response.status_code == 200 and "image" in response.headers.get(
                 "Content-Type", ""
             ):
-                bot.send_photo(CHANNEL_ID, response.content, caption=tg_caption)
+                msg = bot.send_photo(CHANNEL_ID, response.content, caption=tg_caption)
             else:
-                bot.send_message(CHANNEL_ID, tg_caption)
+                msg = bot.send_message(CHANNEL_ID, tg_caption)
         except Exception as e:
             print(f"[Send] Image error: {e}")
-            bot.send_message(CHANNEL_ID, tg_caption)
+            msg = bot.send_message(CHANNEL_ID, tg_caption)
     else:
-        bot.send_message(CHANNEL_ID, tg_caption)
+        msg = bot.send_message(CHANNEL_ID, tg_caption)
 
-    # Store Instagram-resolved fields in Supabase
-    save_post_to_supabase(post_link, caption_body, image_url)
-    # Be polite between Instagram requests when posting batches
+    msg_id = getattr(msg, "message_id", None) if msg is not None else None
+    save_post_to_supabase(post_link, caption_body, image_url, telegram_message_id=msg_id)
     time.sleep(1.0)
+
 
 
 def process_new_posts():
@@ -477,16 +485,125 @@ def run_scheduler():
             time.sleep(60)
 
 
+
+def edit_posts_on_telegram():
+    """
+    For each stored Instagram link: fetch full caption (no link-in-bio),
+    update Supabase, and edit the Telegram channel message when message_id exists.
+    """
+    print("[EditPost] Starting...")
+    try:
+        response = (
+            supabase.table("posted_links")
+            .select("id, link, caption, image_url, telegram_message_id")
+            .order("created_at", desc=True)
+            .limit(200)
+            .execute()
+        )
+        rows = response.data or []
+    except Exception as e:
+        return {
+            "ok": False,
+            "changed": 0,
+            "message": f"❌ Could not load posts from Supabase: {e}",
+        }
+
+    if not rows:
+        return {
+            "ok": True,
+            "changed": 0,
+            "message": "✅ No posts found in Supabase.",
+        }
+
+    changed = 0
+    tg_edited = 0
+    db_only = 0
+    skipped = 0
+    errors = 0
+
+    for row in rows:
+        link = row.get("link") or ""
+        if not instagram_shortcode(link):
+            skipped += 1
+            continue
+
+        try:
+            ig = fetch_info_from_instagram_link(link)
+            new_caption = remove_bio_phrases(ig.get("caption") or "") or "New post"
+            new_image = ig.get("image_url") or media_url_from_link(link) or row.get("image_url") or ""
+
+            old_caption = (row.get("caption") or "").strip()
+            caption_changed = remove_bio_phrases(old_caption) != new_caption or old_caption != new_caption
+
+            # Always write cleaned full caption + image to Supabase
+            update_post_fields(link, caption=new_caption, image_url=new_image)
+
+            msg_id = row.get("telegram_message_id")
+            tg_caption = f"🎬 {new_caption}\n\n🔗 {get_clean_link(link)}"[:1024]
+
+            edited_tg = False
+            if msg_id:
+                try:
+                    bot.edit_message_caption(
+                        chat_id=CHANNEL_ID,
+                        message_id=int(msg_id),
+                        caption=tg_caption,
+                    )
+                    edited_tg = True
+                    tg_edited += 1
+                except Exception as e:
+                    # Maybe it was a text-only message
+                    try:
+                        bot.edit_message_text(
+                            tg_caption,
+                            chat_id=CHANNEL_ID,
+                            message_id=int(msg_id),
+                        )
+                        edited_tg = True
+                        tg_edited += 1
+                    except Exception as e2:
+                        print(f"[EditPost] TG edit failed for {link}: {e2}")
+                        db_only += 1
+            else:
+                db_only += 1
+
+            changed += 1
+            print(f"[EditPost] Updated {get_clean_link(link)} tg={edited_tg}")
+        except Exception as e:
+            errors += 1
+            print(f"[EditPost] Error on {link}: {e}")
+
+        time.sleep(1.2)
+
+    message = (
+        f"✅ /edit_post finished\n"
+        f"• Posts processed: {changed}\n"
+        f"• Telegram captions edited: {tg_edited}\n"
+        f"• Supabase-only (no message id): {db_only}\n"
+        f"• Skipped: {skipped}\n"
+        f"• Errors: {errors}"
+    )
+    if changed == 0 and errors:
+        message = f"❌ /edit_post failed for all rows ({errors} errors)."
+        ok = False
+    else:
+        ok = True
+
+    print(message)
+    return {"ok": ok, "changed": changed, "message": message}
+
+
+
 HELP_TEXT = (
     "🤖 *Bot commands*\n\n"
     "/start — Confirm the bot is running\n"
     "/help — Show this help message\n"
     "/snd — Manually check for new Instagram posts and send them to the channel\n"
     "/refill — Fill empty caption/image\\_url using each row's Instagram link "
-    "(alias: /backfill)\n\n"
-    "📱 Open the *Mini App* from the menu button to browse the feed.\n\n"
-    "ℹ️ New posts always resolve caption + image from the Instagram URL "
-    "before saving to Supabase."
+    "(alias: /backfill)\n"
+    "/edit_post — Re-fetch full captions from Instagram (no link-in-bio), "
+    "update Supabase and edit Telegram channel posts\n\n"
+    "📱 Open the *Mini App* from the menu button to browse the feed."
 )
 
 
@@ -519,6 +636,21 @@ def refill_command(message):
     except Exception as e:
         traceback.print_exc()
         bot.reply_to(message, f"❌ Refill failed with an error:\n{e}")
+
+
+@bot.message_handler(commands=["edit_post"])
+def edit_post_command(message):
+    bot.reply_to(
+        message,
+        "✏️ Updating captions from each Instagram link…\n"
+        "Edits Telegram posts when message ids are stored. This can take a few minutes.",
+    )
+    try:
+        result = edit_posts_on_telegram()
+        bot.reply_to(message, result["message"])
+    except Exception as e:
+        traceback.print_exc()
+        bot.reply_to(message, f"❌ /edit_post failed:\n{e}")
 
 
 @bot.message_handler(commands=["start"])

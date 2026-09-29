@@ -591,6 +591,97 @@
       max-width: 1200px;
       margin: 0 auto;
     }
+
+    /* ---- Post viewer (zoom / swipe between posts) ---- */
+    .viewer {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      background: rgba(0, 0, 0, 0.94);
+      display: none;
+      flex-direction: column;
+      color: #fff;
+    }
+    .viewer.open { display: flex; }
+    .viewer-top {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.12);
+    }
+    .viewer-top button {
+      width: 40px; height: 40px;
+      border: none; border-radius: 10px;
+      background: rgba(255,255,255,0.08);
+      color: #fff; font-size: 18px; cursor: pointer;
+    }
+    .viewer-top .v-title { flex: 1; font-weight: 700; font-size: 14px; }
+    .viewer-scroll {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      scroll-snap-type: y mandatory;
+      overscroll-behavior: contain;
+    }
+    .viewer-slide {
+      min-height: 100%;
+      scroll-snap-align: start;
+      display: flex;
+      flex-direction: column;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    .viewer-media {
+      width: 100%;
+      max-width: 720px;
+      margin: 0 auto;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40vh;
+    }
+    .viewer-media img {
+      width: 100%;
+      height: auto;
+      max-height: 75vh;
+      object-fit: contain;
+      display: block;
+    }
+    .viewer-body {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 16px 16px 28px;
+      width: 100%;
+    }
+    .viewer-meta { font-size: 12px; color: #aaa; margin-bottom: 8px; }
+    .viewer-caption {
+      font-size: 15px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .viewer-actions { margin-top: 16px; }
+    .viewer-actions a {
+      display: inline-flex;
+      align-items: center;
+      height: 40px;
+      padding: 0 14px;
+      border-radius: 10px;
+      background: var(--accent, #e63946);
+      color: #fff;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .viewer-nav-hint {
+      text-align: center;
+      font-size: 11px;
+      color: #777;
+      padding: 8px;
+    }
+
   </style>
 </head>
 <body>
@@ -634,6 +725,17 @@
   <main id="feed" class="feed" aria-live="polite"></main>
 
   <p class="footer-note">Powered by Telegram · Images proxied for reliable mobile viewing</p>
+
+  
+  <div class="viewer" id="viewer" aria-hidden="true">
+    <div class="viewer-top">
+      <button type="button" id="viewer-close" aria-label="Close">←</button>
+      <div class="v-title" id="viewer-title">Post</div>
+      <button type="button" id="viewer-prev" aria-label="Previous">↑</button>
+      <button type="button" id="viewer-next" aria-label="Next">↓</button>
+    </div>
+    <div class="viewer-scroll" id="viewer-scroll"></div>
+  </div>
 
   <button class="fab" id="fab-refresh" type="button" title="Refresh feed" aria-label="Refresh">↻</button>
 
@@ -866,9 +968,119 @@
           });
         }
 
+        card.style.cursor = "pointer";
+        card.addEventListener("click", (e) => {
+          if (e.target.closest("a, button, .read-more, .btn-open, .btn-action")) return;
+          openViewer(index);
+        });
         feed.appendChild(card);
       });
     }
+
+
+    function cleanCaption(text) {
+      if (!text) return "";
+      let t = String(text);
+      const patterns = [
+        /\s*link\s+in\s+(?:the\s+)?(?:bio|comments?)\b[^.!\n]*[.!]?/gi,
+        /\s*read\s+more\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?/gi,
+        /\s*full\s+(?:review|article|story)\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?/gi,
+        /\s*more\s+(?:info|details?|here)\s+in\s+(?:bio|comments?)\b[^.!\n]*[.!]?/gi,
+        /\s*(?:check|see|click)(?:\s+out)?\s+(?:the\s+)?link\s+in\s+bio\b[^.!\n]*[.!]?/gi,
+        /\s*link\s+in\s+bio\b[.!]?/gi,
+        /\s*(?:check|see|click)(?:\s+out)?\s+the\s*$/gi,
+        /\s*view\s+all\s+\d+\s+comments\b[.!]?/gi,
+        /\s*\.{2,}\s*$/g,
+      ];
+      for (const p of patterns) t = t.replace(p, "");
+      return t.replace(/[ \t]+/g, " ").trim().replace(/^[.\-–—|\s]+|[.\-–—|\s]+$/g, "");
+    }
+
+    let viewerIndex = 0;
+
+    function buildViewerSlides(startIndex) {
+      const sc = document.getElementById("viewer-scroll");
+      sc.innerHTML = "";
+      allPosts.forEach((post, i) => {
+        const slide = document.createElement("div");
+        slide.className = "viewer-slide";
+        slide.dataset.index = i;
+        const src = imageSrc(post.image_url);
+        const cap = cleanCaption(post.caption) || "No caption.";
+        slide.innerHTML = `
+          <div class="viewer-media">
+            ${src ? `<img src="${escapeHtml(src)}" alt="" />` : `<div style="padding:40px;opacity:.4;font-size:40px">🎬</div>`}
+          </div>
+          <div class="viewer-body">
+            <div class="viewer-meta">${escapeHtml(formatDate(post.created_at))} · ${i + 1} / ${allPosts.length}</div>
+            <p class="viewer-caption">${escapeHtml(cap)}</p>
+            <div class="viewer-actions">
+              <a href="${escapeHtml(post.link || "#")}" target="_blank" rel="noopener">Open on Instagram</a>
+            </div>
+            <p class="viewer-nav-hint">Scroll for next / previous posts</p>
+          </div>
+        `;
+        const img = slide.querySelector("img");
+        if (img) img.addEventListener("error", () => { img.style.display = "none"; });
+        sc.appendChild(slide);
+      });
+      // Jump to start slide
+      requestAnimationFrame(() => {
+        const target = sc.querySelector(`.viewer-slide[data-index="${startIndex}"]`);
+        if (target) target.scrollIntoView({ block: "start" });
+      });
+    }
+
+    function openViewer(index) {
+      if (!allPosts.length) return;
+      viewerIndex = Math.max(0, Math.min(index, allPosts.length - 1));
+      document.getElementById("viewer-title").textContent = `Post ${viewerIndex + 1} of ${allPosts.length}`;
+      buildViewerSlides(viewerIndex);
+      const v = document.getElementById("viewer");
+      v.classList.add("open");
+      v.setAttribute("aria-hidden", "false");
+      if (tg?.BackButton) {
+        tg.BackButton.show();
+        tg.BackButton.onClick(closeViewer);
+      }
+    }
+
+    function closeViewer() {
+      const v = document.getElementById("viewer");
+      v.classList.remove("open");
+      v.setAttribute("aria-hidden", "true");
+      if (tg?.BackButton) {
+        tg.BackButton.hide();
+        try { tg.BackButton.offClick(closeViewer); } catch (_) {}
+      }
+    }
+
+    function viewerStep(delta) {
+      const sc = document.getElementById("viewer-scroll");
+      const slides = [...sc.querySelectorAll(".viewer-slide")];
+      if (!slides.length) return;
+      // Determine current by scroll position
+      let current = 0;
+      const top = sc.scrollTop;
+      slides.forEach((s, i) => {
+        if (s.offsetTop <= top + 20) current = i;
+      });
+      const next = Math.max(0, Math.min(slides.length - 1, current + delta));
+      slides[next].scrollIntoView({ behavior: "smooth", block: "start" });
+      document.getElementById("viewer-title").textContent = `Post ${next + 1} of ${allPosts.length}`;
+    }
+
+    document.getElementById("viewer-close")?.addEventListener("click", closeViewer);
+    document.getElementById("viewer-prev")?.addEventListener("click", () => viewerStep(-1));
+    document.getElementById("viewer-next")?.addEventListener("click", () => viewerStep(1));
+    document.addEventListener("keydown", (e) => {
+      const v = document.getElementById("viewer");
+      if (!v?.classList.contains("open")) return;
+      if (e.key === "Escape") closeViewer();
+      if (e.key === "ArrowDown" || e.key === "ArrowRight") viewerStep(1);
+      if (e.key === "ArrowUp" || e.key === "ArrowLeft") viewerStep(-1);
+    });
+
 
     async function fetchPosts() {
       const fab = document.getElementById("fab-refresh");
@@ -881,7 +1093,10 @@
         const res = await fetch(API_URL);
         const data = await res.json();
         if (!data.ok) throw new Error(data.error || "API error");
-        allPosts = data.posts || [];
+        allPosts = (data.posts || []).map((p) => ({
+          ...p,
+          caption: typeof cleanCaption === "function" ? cleanCaption(p.caption) : p.caption,
+        }));
         render();
       } catch (err) {
         console.error(err);
