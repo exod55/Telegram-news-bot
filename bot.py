@@ -666,7 +666,7 @@ def edit_posts_on_telegram(repost_if_missing=False):
 
 
 HELP_TEXT = (
-    "🤖 *Bot commands*\n\n"
+    "🤖 Bot commands\n\n"
     "/start — Confirm the bot is running\n"
     "/help — Show this help message\n"
     "/snd — Manually check for new Instagram posts and send them to the channel\n"
@@ -674,13 +674,13 @@ HELP_TEXT = (
     "(alias: /backfill)\n"
     "/edit_post — Update captions from Instagram; edit Telegram if message id exists\n"
     "/edit_post repost — Repost to channel when message id is missing (saves new ids)\n\n"
-    "📱 Open the *Mini App* from the menu button to browse the feed."
+    "📱 Open the Mini App from the menu button to browse the feed."
 )
 
 
 @bot.message_handler(commands=["help"])
 def help_command(message):
-    bot.reply_to(message, HELP_TEXT, parse_mode="Markdown")
+    bot.reply_to(message, HELP_TEXT)
 
 
 @bot.message_handler(commands=["snd"])
